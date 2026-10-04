@@ -8,7 +8,7 @@ import com.easyesuite.core.net.ApiException
 import kotlinx.serialization.json.JsonElement
 
 /**
- * Login / 2FA / refresh against the tenant-scoped `auth/*` endpoints.
+ * Login / 2FA / refresh against the tenant-scoped `auth/…` endpoints.
  *
  * The web app stores `accessToken`, `refreshToken`, `access_expiration` and `refresh_expiration`
  * after login, which is exactly dj-rest-auth's JWT response, so that is what we expect here.

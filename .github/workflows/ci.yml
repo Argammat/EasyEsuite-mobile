@@ -42,20 +42,24 @@ jobs:
 
   ios:
     name: iOS · kit tests + app build
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_15.4.app && xcodebuild -version && swift --version
+      - name: Toolchain
+        run: xcodebuild -version && swift --version
       - name: Kit unit tests (SwiftPM, macOS)
+        id: kittests
+        continue-on-error: true
         working-directory: ios/EasyEsuiteKit
-        run: swift test 2>&1 | tee ../../kit-test.log | tail -40
+        run: swift test
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate project
         working-directory: ios
-        run: xcodegen generate
+        run: |
+          xcodegen generate
+          head -5 EasyEsuite.xcodeproj/project.pbxproj
       - name: Build app for simulator
         working-directory: ios
         run: |
@@ -67,14 +71,15 @@ jobs:
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
-            build 2>&1 | tee ../xcodebuild.log | grep -E "error:|warning: unre|BUILD (SUCCEEDED|FAILED)" || true
+            build 2>&1 | tee ../xcodebuild.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
           grep -q "BUILD SUCCEEDED" ../xcodebuild.log
+      - name: Kit tests result
+        if: steps.kittests.outcome == 'failure'
+        run: echo "::error::EasyEsuiteKit unit tests failed (see 'Kit unit tests' step)"; exit 1
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ios-logs
-          path: |
-            kit-test.log
-            xcodebuild.log
+          path: xcodebuild.log
           if-no-files-found: ignore

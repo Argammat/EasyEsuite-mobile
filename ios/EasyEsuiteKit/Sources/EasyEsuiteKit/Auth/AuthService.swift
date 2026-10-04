@@ -1,6 +1,6 @@
 import Foundation
 
-/// Login / 2FA / me against the tenant-scoped `auth/*` endpoints (dj-rest-auth JWT conventions).
+/// Login / 2FA / me against the tenant-scoped `auth/…` endpoints (dj-rest-auth JWT conventions).
 public final class AuthService: @unchecked Sendable {
     private let client: APIClient
     public init(client: APIClient) { self.client = client }

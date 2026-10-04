@@ -9,7 +9,10 @@ final class MockURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        MockURLProtocol.requests.append(request)
+        // Capture the body now: URLSession hands us a stream, which is gone by the time a test inspects the request.
+        var captured = request
+        if captured.httpBody == nil, let body = request.bodyData { captured.httpBody = body }
+        MockURLProtocol.requests.append(captured)
         let (status, data) = MockURLProtocol.handler?(request) ?? (500, Data())
         let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
