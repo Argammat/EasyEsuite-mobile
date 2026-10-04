@@ -1,5 +1,7 @@
 # EasyEsuite Mobile
 
+[![CI](https://github.com/Argammat/EasyEsuite-mobile/actions/workflows/ci.yml/badge.svg)](https://github.com/Argammat/EasyEsuite-mobile/actions/workflows/ci.yml)
+
 Native iOS (Swift/SwiftUI) and Android (Kotlin/Jetpack Compose) apps for the EasyEsuite ERP, built against the
 same tenant-scoped REST API the web app and the EasyEsuite MCP server use.
 
@@ -53,6 +55,15 @@ bodies, image upload, copilot payload). Each lives in exactly one place per plat
 | Endpoint paths | `core/.../ApiConfig.kt` → `Endpoints` | `EasyEsuiteKit/.../ApiConfig.swift` → `Endpoints` |
 | Login / refresh field names | `core/.../auth/Session.kt` → `TokenResponse` | `EasyEsuiteKit/.../Auth/Session.swift` → `TokenResponse` |
 | Request bodies | `core/.../model/*.kt` (`*Request`) | `EasyEsuiteKit/.../Model/*.swift` (`*Request`) |
+
+## CI
+
+Every push to `main` runs `.github/workflows/ci.yml`:
+
+- **Android** (ubuntu): `:core:test` then `:app:assembleDebug`; the debug APK is attached to the run as an artifact.
+- **iOS** (macos-15, Xcode 16.4): `swift test` for EasyEsuiteKit, then XcodeGen + a simulator build of the app.
+
+Both jobs are green as of the first commit series; macOS minutes are billed at 10×, so doc-only commits should carry `[skip ci]`.
 
 ## Testing
 

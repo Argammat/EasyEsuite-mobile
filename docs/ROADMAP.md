@@ -7,6 +7,7 @@
 - [x] Orders list/detail/fulfil; shipments list/detail; rates → buy label; hold/release; tracking; scan-to-verify
 - [x] Dashboard, sales-by-item report, carrier spend
 - [x] Copilot chat
+- [x] CI: both apps compile and SDK tests pass on GitHub Actions
 - [ ] Confirm every **ASSUMED** row in `docs/API_MAP.md` against the web app (one DevTools session)
 - [ ] App icons, launch screen, store listings
 - [ ] Crash/analytics SDK (Sentry is already used on the web app)
