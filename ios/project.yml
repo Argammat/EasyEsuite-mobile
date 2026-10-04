@@ -1,0 +1,57 @@
+# XcodeGen spec — run `xcodegen generate` in this folder, then open EasyEsuite.xcodeproj.
+name: EasyEsuite
+options:
+  bundleIdPrefix: com.easyesuite
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+  createIntermediateGroups: true
+
+packages:
+  EasyEsuiteKit:
+    path: EasyEsuiteKit
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""          # set your Apple team id
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  EasyEsuite:
+    type: application
+    platform: iOS
+    sources:
+      - path: EasyEsuite
+    dependencies:
+      - package: EasyEsuiteKit
+    info:
+      path: EasyEsuite/Resources/Info.plist
+      properties:
+        CFBundleDisplayName: EasyEsuite
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        NSCameraUsageDescription: EasyEsuite uses the camera to scan product barcodes and shipping labels, and to photograph new items.
+        NSPhotoLibraryUsageDescription: EasyEsuite lets you attach photos from your library to items.
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.easyesuite.mobile
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+
+schemes:
+  EasyEsuite:
+    build:
+      targets:
+        EasyEsuite: all
+    run:
+      config: Debug
+    # Kit tests run as a SwiftPM package test: `cd EasyEsuiteKit && swift test`
+    # (or pick the EasyEsuiteKit scheme Xcode generates for the local package).

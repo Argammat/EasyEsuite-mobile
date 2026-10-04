@@ -1,0 +1,25 @@
+# Android
+android/.gradle/
+android/**/build/
+android/local.properties
+android/.idea/
+android/*.iml
+android/**/*.iml
+android/.kotlin/
+android/captures/
+android/app/release/
+
+# iOS
+ios/*.xcodeproj/
+ios/*.xcworkspace/
+ios/**/xcuserdata/
+ios/**/DerivedData/
+ios/.build/
+ios/EasyEsuiteKit/.build/
+ios/EasyEsuiteKit/.swiftpm/
+ios/Pods/
+
+# OS / editor
+.DS_Store
+*.swp
+.vscode/
