@@ -58,7 +58,8 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(items.filter { $0.name == "status" }.map(\.value), ["Open", "Partial Received"])
         XCTAssertEqual(items.first { $0.name == "is_available" }?.value, "true")
         XCTAssertNil(items.first { $0.name == "search" })
-        XCTAssertEqual(url.path, "/clients/demo/api/v1/purchase_orders/purchase_orders/")
+        // URL.path strips the trailing slash; DRF needs it, so assert on the real string.
+        XCTAssertTrue(url.absoluteString.hasPrefix("https://api-new.easyesuite.com/clients/demo/api/v1/purchase_orders/purchase_orders/?"))
     }
 
     func testGetSendsBearerAndDecodesPage() async throws {
@@ -76,14 +77,14 @@ final class APIClientTests: XCTestCase {
         var calls = 0
         MockURLProtocol.handler = { req in
             calls += 1
-            if req.url!.path.hasSuffix("/auth/token/refresh/") { return (200, Data(#"{"access":"new-access"}"#.utf8)) }
+            if req.url!.absoluteString.hasSuffix("/auth/token/refresh/") { return (200, Data(#"{"access":"new-access"}"#.utf8)) }
             if req.value(forHTTPHeaderField: "Authorization") == "Bearer old-access" { return (401, Data(#"{"detail":"expired"}"#.utf8)) }
             return (200, warehouses)
         }
         let page: Page<Warehouse> = try await client.get("items/warehouses/")
         XCTAssertEqual(page.results.count, 3)
         XCTAssertEqual(calls, 3)
-        let refresh = try XCTUnwrap(MockURLProtocol.requests.first { $0.url!.path.hasSuffix("/auth/token/refresh/") })
+        let refresh = try XCTUnwrap(MockURLProtocol.requests.first { $0.url!.absoluteString.hasSuffix("/auth/token/refresh/") })
         XCTAssertNil(refresh.value(forHTTPHeaderField: "Authorization"))
         XCTAssertEqual(String(data: refresh.bodyData ?? Data(), encoding: .utf8), #"{"refresh":"refresh-1"}"#)
         XCTAssertEqual(store.load()?.access, "new-access")
@@ -118,7 +119,7 @@ final class APIClientTests: XCTestCase {
         store.clear()
         let me = try fixture("users_me")
         MockURLProtocol.handler = { req in
-            if req.url!.path.hasSuffix("/auth/login/") { return (200, Data(#"{"access":"a1","refresh":"r1","access_expiration":"2026-10-04T01:00:00Z"}"#.utf8)) }
+            if req.url!.absoluteString.hasSuffix("/auth/login/") { return (200, Data(#"{"access":"a1","refresh":"r1","access_expiration":"2026-10-04T01:00:00Z"}"#.utf8)) }
             return (200, me)
         }
         let auth = AuthService(client: client)
@@ -126,7 +127,7 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(session.access, "a1")
         XCTAssertEqual(store.load()?.refresh, "r1")
         let loginReq = try XCTUnwrap(MockURLProtocol.requests.first)
-        XCTAssertEqual(loginReq.url?.path, "/clients/demo/api/v1/auth/login/")
+        XCTAssertEqual(loginReq.url?.absoluteString, "https://api-new.easyesuite.com/clients/demo/api/v1/auth/login/")
         XCTAssertNil(loginReq.value(forHTTPHeaderField: "Authorization"))
         let profile = try await auth.me()
         XCTAssertEqual(profile.displayName, "Test Test")
