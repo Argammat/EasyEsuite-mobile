@@ -76,7 +76,8 @@ final class LoginModel: ObservableObject {
         step = .workspace
         busy = workspaces.isEmpty && switching
         if workspaces.isEmpty && switching {
-            let graph = container.makeGraph()
+            // Still inside the previous workspace: its graph tries the global list and the tenant-scoped (verified) one.
+            let graph = container.makeGraph(tenant: last ?? "")
             Task {
                 let list = (try? await graph.auth.workspaces()) ?? []
                 self.workspaces = list

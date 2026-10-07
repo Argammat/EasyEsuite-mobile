@@ -158,7 +158,11 @@ public final class APIClient: @unchecked Sendable {
 
     /// Absolute URL string under the global (tenant-less) root — for the calls made before a workspace is chosen.
     public func globalPath(_ path: String) -> String {
-        config.globalRoot.appendingPathComponent(path.hasPrefix("/") ? String(path.dropFirst()) : path, isDirectory: path.hasSuffix("/")).absoluteString
+        // Plain string concatenation: `appendingPathComponent("auth/login/", isDirectory: true)` doubles the
+        // trailing slash on Darwin, which the tests (and DRF's strict routing) reject.
+        var root = config.globalRoot.absoluteString
+        if !root.hasSuffix("/") { root += "/" }
+        return root + (path.hasPrefix("/") ? String(path.dropFirst()) : path)
     }
 
     public func url(_ path: String, query: [String: Any?]) -> URL {

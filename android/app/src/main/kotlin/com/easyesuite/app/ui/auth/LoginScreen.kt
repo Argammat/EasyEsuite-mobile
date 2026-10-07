@@ -148,7 +148,8 @@ class LoginViewModel(private val container: AppContainer) : ViewModel() {
         }
         if (workspaces.isEmpty() && switching) {
             viewModelScope.launch {
-                val list = runCatching { container.graphFor().auth.workspaces() }.getOrDefault(emptyList())
+                // Still inside the previous workspace: its graph tries the global list and the tenant-scoped (verified) one.
+                val list = runCatching { container.graphFor(last.orEmpty()).auth.workspaces() }.getOrDefault(emptyList())
                 ui.update { it.copy(busy = false, workspaces = list, selectedTenant = list.firstOrNull { w -> w.slug == last }?.slug ?: list.firstOrNull()?.slug) }
             }
         }

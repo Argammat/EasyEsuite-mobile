@@ -130,10 +130,10 @@ struct OrdersView: View {
         }
         .searchable(text: $shipments.search.text, prompt: "Order #, tracking #, recipient")
     }
-}
 
     private var invoicesList: some View {
-        let statusOptions: [(String?, String)] = [(nil, "All")] + InvoiceStatus.all.map { ($0, $0) }
+        var statusOptions: [(String?, String)] = [(nil, "All")]
+        for s in InvoiceStatus.all { statusOptions.append((s, s)) }
         return PagedListView(model: invoices, emptyTitle: "No invoices here", header: {
             ChipRow(options: statusOptions, selected: invoices.status) { invoices.status = $0 }
                 .listRowInsets(EdgeInsets()).listRowSeparator(.hidden)
