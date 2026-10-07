@@ -29,7 +29,7 @@ public struct BackendTokenRefresher: TokenRefresher {
     public func refresh(_ current: Session) async -> Session? {
         guard let refresh = current.refresh,
               let body = try? client.encoder.encode(RefreshRequest(refresh: refresh)),
-              let res = try? await client.rawPost(Endpoints.tokenRefresh, body: body),
+              let res = try? await client.rawPost(current.isPending ? client.globalPath(Endpoints.tokenRefresh) : Endpoints.tokenRefresh, body: body),
               (200..<300).contains(res.status),
               let parsed = try? client.decoder.decode(TokenResponse.self, from: res.data),
               let access = parsed.resolvedAccess else { return nil }

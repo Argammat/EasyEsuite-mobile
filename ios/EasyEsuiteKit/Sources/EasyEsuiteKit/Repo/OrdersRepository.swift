@@ -20,6 +20,26 @@ public final class OrdersRepository: @unchecked Sendable {
 
     public func order(_ id: Int64) async throws -> SalesOrderDetail { try await client.get("\(Endpoints.salesOrders)\(id)/") }
 
+    // MARK: Sales finance (VERIFIED): invoices and customer payments
+
+    /// `sales_orders/invoices/` — filters: status (Open|Paid|Partial Paid|Voided), marketplace, sales_order, search (IN-…), date_after/before.
+    public func invoices(status: String? = nil, search: String? = nil, salesOrderId: Int64? = nil, range: DateRange? = nil, page: PageQuery = PageQuery()) async throws -> Page<Invoice> {
+        var q: [String: Any?] = page.query.merging(["status": status, "search": search?.nilIfBlank, "sales_order": salesOrderId, "ordering": "-date"]) { $1 }
+        if let range { q.merge(range.query()) { $1 } }
+        return try await client.get(Endpoints.invoices, query: q)
+    }
+
+    public func invoice(_ id: Int64) async throws -> Invoice { try await client.get("\(Endpoints.invoices)\(id)/") }
+
+    /// `sales_orders/payments/` — customer payments, newest first. `search` is ASSUMED (payment number / ref).
+    public func payments(search: String? = nil, range: DateRange? = nil, page: PageQuery = PageQuery()) async throws -> Page<Payment> {
+        var q: [String: Any?] = page.query.merging(["search": search?.nilIfBlank, "ordering": "-date"]) { $1 }
+        if let range { q.merge(range.query()) { $1 } }
+        return try await client.get(Endpoints.payments, query: q)
+    }
+
+    public func payment(_ id: Int64) async throws -> Payment { try await client.get("\(Endpoints.payments)\(id)/") }
+
     public func findByNumber(_ number: String) async throws -> SalesOrderSummary? {
         let p: Page<SalesOrderSummary> = try await client.get(Endpoints.salesOrders, query: ["number": number.trimmingCharacters(in: .whitespaces), "limit": 1])
         return p.results.first

@@ -92,6 +92,8 @@ public enum Endpoints {
 
     // Orders & shipping
     public static let salesOrders = "sales_orders/sales_orders/"
+    public static let invoices = "sales_orders/invoices/"
+    public static let payments = "sales_orders/payments/"
     public static let fulfillments = "sales_orders/fulfillments/"
     public static let shipments = "shipping/shipments/"
     public static let shipmentResolveBarcode = "shipping/shipments/resolve_barcode/"

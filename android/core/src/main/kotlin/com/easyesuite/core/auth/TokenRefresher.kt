@@ -28,7 +28,8 @@ class BackendTokenRefresher(private val client: ApiClient) : TokenRefresher {
     override suspend fun refresh(current: Session): Session? {
         val refresh = current.refresh ?: return null
         val body = DefaultJson.encodeToString(RefreshRequest.serializer(), RefreshRequest(refresh))
-        val res = runCatching { client.rawPost(Endpoints.TOKEN_REFRESH, body) }.getOrNull() ?: return null
+        val path = if (current.isPending) client.globalPath(Endpoints.TOKEN_REFRESH) else Endpoints.TOKEN_REFRESH
+        val res = runCatching { client.rawPost(path, body) }.getOrNull() ?: return null
         if (res.status !in 200..299 || res.body.isNullOrBlank()) return null
         val parsed = runCatching { DefaultJson.decodeFromString(TokenResponse.serializer(), res.body) }.getOrNull() ?: return null
         val access = parsed.resolvedAccess ?: return null

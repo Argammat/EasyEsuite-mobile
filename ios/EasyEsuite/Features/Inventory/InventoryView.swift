@@ -152,7 +152,7 @@ struct InventoryView: View {
     private func chip(_ label: String, on: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(label).font(.caption).padding(.horizontal, 10).padding(.vertical, 6)
-                .background(on ? Brand.blue : Color(.secondarySystemBackground)).foregroundStyle(on ? .white : .primary).clipShape(Capsule())
+                .background(on ? Brand.greenTint : Color(.secondarySystemBackground)).foregroundStyle(on ? Brand.greenText : .primary).fontWeight(on ? .semibold : .regular).clipShape(Capsule())
         }.buttonStyle(.plain)
     }
 }

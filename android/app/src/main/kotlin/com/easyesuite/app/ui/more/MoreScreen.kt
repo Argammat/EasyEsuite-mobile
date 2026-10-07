@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -99,6 +100,8 @@ fun SettingsScreen(graph: AppContainer.Graph, nav: NavHostController, container:
             KeyValueRow("App version", BuildConfig.VERSION_NAME)
             if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error)
             Spacer(Modifier.height(24.dp))
+            OutlinedButton(onClick = { container.switchWorkspace() }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.SwapHoriz, null); Spacer(Modifier.width(8.dp)); Text("Switch workspace") }
+            Spacer(Modifier.height(8.dp))
             Button(onClick = { confirmSignOut = true }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Logout, null); Spacer(Modifier.width(8.dp)); Text("Sign out") }
         }
     }
@@ -106,7 +109,7 @@ fun SettingsScreen(graph: AppContainer.Graph, nav: NavHostController, container:
         AlertDialog(
             onDismissRequest = { confirmSignOut = false },
             title = { Text("Sign out?") },
-            text = { Text("You'll need your company name, email and password to sign back in.") },
+            text = { Text("You'll need your email and password to sign back in.") },
             confirmButton = { TextButton(onClick = { confirmSignOut = false; container.signOut() }) { Text("Sign out") } },
             dismissButton = { TextButton(onClick = { confirmSignOut = false }) { Text("Cancel") } },
         )

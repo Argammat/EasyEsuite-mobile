@@ -47,7 +47,7 @@ struct AssistantView: View {
                             VStack(alignment: mine ? .trailing : .leading, spacing: 6) {
                                 Text(m.text)
                                     .padding(12)
-                                    .background(m.isError ? Color.red.opacity(0.12) : (mine ? Brand.blue : Color(.secondarySystemBackground)))
+                                    .background(m.isError ? Color.red.opacity(0.12) : (mine ? Brand.greenDeep : Color(.secondarySystemBackground)))
                                     .foregroundStyle(mine ? .white : .primary)
                                     .clipShape(RoundedRectangle(cornerRadius: 14))
                                     .frame(maxWidth: 320, alignment: mine ? .trailing : .leading)

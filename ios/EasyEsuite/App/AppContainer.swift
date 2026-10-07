@@ -11,11 +11,11 @@ final class AppContainer: ObservableObject {
     let tokenStore = KeychainTokenStore()
     private(set) var graph: Graph?
 
-    /// Company name → workspace + Identity Platform tenant id (used only when Firebase sign-in is configured).
-    let tenantDirectory = TenantDirectory(apiRoot: AppConfig.apiRoot)
-
     /// True when this build signs in against Firebase / Identity Platform (see `AppConfig`).
     var firebaseSignIn: Bool { AppConfig.firebaseApiKey != nil }
+
+    /// Set by `switchWorkspace()`: the login screen opens straight on the workspace picker with these tokens.
+    private(set) var pendingSwitch: Session?
 
     final class Graph {
         let tenant: String
@@ -44,11 +44,16 @@ final class AppContainer: ObservableObject {
     }
 
     init() {
-        session = tokenStore.load()
+        // A session whose workspace is still to be chosen never counts as signed in (and is dropped on launch).
+        if let stored = tokenStore.load() {
+            if stored.isPending { tokenStore.clear() } else { session = stored }
+        }
         if let s = session { graph = makeGraph(tenant: s.tenant, firebaseTenantId: s.firebaseTenantId) }
     }
 
-    func makeGraph(tenant: String, firebaseTenantId: String? = nil) -> Graph {
+    /// A graph for signing in. With a blank tenant the auth calls go to the global root (email + password first,
+    /// workspace afterwards); with a tenant they are scoped to that workspace.
+    func makeGraph(tenant: String = "", firebaseTenantId: String? = nil) -> Graph {
         Graph(tenant: tenant, firebaseTenantId: firebaseTenantId, tokenStore: tokenStore) { [weak self] in
             Task { @MainActor in self?.signOut() }
         }
@@ -57,15 +62,33 @@ final class AppContainer: ObservableObject {
     /// Graph for the active tenant; only valid while signed in.
     func require() -> Graph { graph! }
 
-    func signedIn(_ session: Session, using graph: Graph) {
+    func signedIn(_ session: Session) {
         tokenStore.lastTenant = session.tenant
         tokenStore.lastEmail = session.email
-        self.graph = graph
+        pendingSwitch = nil
+        graph = makeGraph(tenant: session.tenant, firebaseTenantId: session.firebaseTenantId)
         self.session = session
+    }
+
+    /// Keep the tokens, drop the workspace: the login screen shows the picker again.
+    func switchWorkspace() {
+        guard var current = session else { return }
+        current.tenant = ""
+        pendingSwitch = current
+        graph = nil
+        session = nil
+    }
+
+    /// Backing out of a workspace switch: restore the previous workspace without re-authenticating.
+    func cancelWorkspaceSwitch() {
+        guard var pending = pendingSwitch, let previous = tokenStore.lastTenant else { return }
+        pending.tenant = previous
+        signedIn(pending)
     }
 
     func signOut() {
         tokenStore.clear()
+        pendingSwitch = nil
         graph = nil
         session = nil
     }

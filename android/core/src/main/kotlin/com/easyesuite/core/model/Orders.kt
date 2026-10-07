@@ -300,3 +300,65 @@ data class TrackingEvent(
     val timestamp: String? get() = datetime ?: date
     val place: String? get() = location ?: listOfNotNull(city, state).joinToString(", ").ifBlank { null }
 }
+
+// ---- Sales finance (VERIFIED against the live API, Oct 2026) -----------------------------------
+
+/** Statuses of `sales_orders/invoices/`. */
+object InvoiceStatus {
+    const val OPEN = "Open"
+    const val PAID = "Paid"
+    const val PARTIAL_PAID = "Partial Paid"
+    const val VOIDED = "Voided"
+    val all = listOf(OPEN, PAID, PARTIAL_PAID, VOIDED)
+}
+
+/** Row of `sales_orders/invoices/` — the billing document for a sales order. */
+@Serializable
+data class Invoice(
+    val id: Long,
+    val number: String = "",
+    val status: String = "",
+    @SerialName("invoice_type") val invoiceType: String? = null,
+    @SerialName("return_status") val returnStatus: String? = null,
+    @SerialName("company_name") val companyName: String? = null,
+    @SerialName("customer_name") val customerName: String? = null,
+    @SerialName("sales_order_number") val salesOrderNumber: String? = null,
+    @SerialName("sales_order_id") val salesOrderId: Long? = null,
+    @SerialName("marketplace_name") val marketplaceName: String? = null,
+    @SerialName("warehouse_name") val warehouseName: String? = null,
+    @SerialName("shipping_method_name") val shippingMethodName: String? = null,
+    @SerialName("tracking_number") val trackingNumber: String? = null,
+    @SerialName("terms_name") val termsName: String? = null,
+    @SerialName("po_number") val poNumber: String? = null,
+    val date: String? = null,
+    @SerialName("due_date") val dueDate: String? = null,
+    @SerialName("total_quantity") val totalQuantity: Int? = null,
+    @SerialName("total_amount") val totalAmount: Money? = null,
+    @SerialName("open_amount") val openAmount: Money? = null,
+    @SerialName("paid_amount_new") val paidAmount: Money? = null,
+    @SerialName("total_tax_amount") val taxAmount: Money? = null,
+    @SerialName("shipping_cost") val shippingCost: Money? = null,
+) {
+    val displayCustomer: String get() = companyName?.takeIf { it.isNotBlank() } ?: customerName ?: "—"
+    val isOpen: Boolean get() = status == InvoiceStatus.OPEN || status == InvoiceStatus.PARTIAL_PAID
+}
+
+/** Row of `sales_orders/payments/` — a customer payment (wire, check, card) and how much of it is applied. */
+@Serializable
+data class Payment(
+    val id: Long,
+    val number: String = "",
+    val status: String = "",
+    @SerialName("customer_name") val customerName: String? = null,
+    @SerialName("payment_method_name") val paymentMethodName: String? = null,
+    @SerialName("bank_name") val bankName: String? = null,
+    @SerialName("ref_number") val refNumber: String? = null,
+    @SerialName("check_number") val checkNumber: String? = null,
+    val memo: String? = null,
+    val date: String? = null,
+    val amount: Money? = null,
+    @SerialName("applied_amount_new") val appliedAmount: Money? = null,
+    @SerialName("un_applied_amount_new") val unappliedAmount: Money? = null,
+) {
+    val hasUnapplied: Boolean get() = unappliedAmount?.let { !it.isZero } == true
+}

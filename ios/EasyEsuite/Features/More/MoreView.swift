@@ -41,6 +41,7 @@ struct SettingsView: View {
                 if let error { Text(error).foregroundStyle(.red).font(.caption) }
             }
             Section {
+                Button { container.switchWorkspace() } label: { Label("Switch workspace", systemImage: "arrow.left.arrow.right") }
                 Button(role: .destructive) { confirmSignOut = true } label: { Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right") }
             }
         }

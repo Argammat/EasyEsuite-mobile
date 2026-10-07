@@ -7,7 +7,6 @@ import com.easyesuite.core.ApiConfig
 import com.easyesuite.core.FirebaseConfig
 import com.easyesuite.core.auth.AuthService
 import com.easyesuite.core.auth.Session
-import com.easyesuite.core.auth.TenantDirectory
 import com.easyesuite.core.net.ApiClient
 import com.easyesuite.core.repo.AssistantRepository
 import com.easyesuite.core.repo.InventoryRepository
@@ -34,15 +33,17 @@ class AppContainer(context: Context) {
         }
     }.build()
 
-    /** Company name → workspace + Identity Platform tenant id (used only when Firebase sign-in is configured). */
-    val tenantDirectory = TenantDirectory(apiRoot = BuildConfig.API_ROOT, http = okHttp)
-
     /** True when this build signs in against Firebase / Identity Platform (see app/build.gradle.kts). */
     val firebaseSignIn: Boolean get() = BuildConfig.FIREBASE_API_KEY.isNotBlank()
 
-    private val _session = MutableStateFlow(tokenStore.load())
+    /** A session whose workspace is still to be chosen never counts as signed in (and is dropped on launch). */
+    private val _session = MutableStateFlow(restoredSession())
     /** Null = signed out. Observed by the root composable to switch between login and the app. */
     val session: StateFlow<Session?> = _session
+
+    /** Set by [switchWorkspace]: the login screen opens straight on the workspace picker with these tokens. */
+    @Volatile var pendingSwitch: Session? = null
+        private set
 
     @Volatile private var graph: Graph? = _session.value?.let { Graph(it.tenant, it.firebaseTenantId) }
 
@@ -69,21 +70,48 @@ class AppContainer(context: Context) {
         val assistant = AssistantRepository(client)
     }
 
+    private fun restoredSession(): Session? {
+        val stored = tokenStore.load() ?: return null
+        if (stored.isPending) { tokenStore.clear(); return null }
+        return stored
+    }
+
     /** Graph for the active tenant; throws if used while signed out (a programming error). */
     fun graph(): Graph = graph ?: error("No active session")
 
-    /** A graph for a tenant the user is trying to sign in to (no session yet). */
-    fun graphFor(tenant: String, firebaseTenantId: String? = null): Graph = Graph(tenant, firebaseTenantId)
+    /**
+     * A graph for signing in. With a blank tenant the auth calls go to the global root (email + password first,
+     * workspace afterwards); with a tenant they are scoped to that workspace.
+     */
+    fun graphFor(tenant: String = "", firebaseTenantId: String? = null): Graph = Graph(tenant, firebaseTenantId)
 
-    fun onSignedIn(session: Session, graphUsed: Graph) {
+    fun onSignedIn(session: Session) {
         tokenStore.lastTenant = session.tenant
         tokenStore.lastEmail = session.email
-        graph = graphUsed
+        pendingSwitch = null
+        graph = Graph(session.tenant, session.firebaseTenantId)
         _session.value = session
+    }
+
+    /** Keep the tokens, drop the workspace: the login screen shows the picker again. */
+    fun switchWorkspace() {
+        val current = _session.value ?: return
+        pendingSwitch = current.copy(tenant = "")
+        graph = null
+        _session.value = null
+    }
+
+    /** Backing out of a workspace switch: restore the previous workspace without re-authenticating. */
+    fun cancelWorkspaceSwitch() {
+        val pending = pendingSwitch ?: return
+        val previous = tokenStore.lastTenant ?: return
+        pendingSwitch = null
+        onSignedIn(pending.copy(tenant = previous))
     }
 
     fun signOut() {
         tokenStore.clear()
+        pendingSwitch = null
         graph = null
         _session.value = null
     }

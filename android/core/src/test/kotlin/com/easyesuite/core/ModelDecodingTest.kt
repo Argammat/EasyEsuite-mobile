@@ -1,10 +1,12 @@
 package com.easyesuite.core
 
 import com.easyesuite.core.model.InventoryItem
+import com.easyesuite.core.model.Invoice
 import com.easyesuite.core.model.ItemDetail
 import com.easyesuite.core.model.ItemSummary
 import com.easyesuite.core.model.Money
 import com.easyesuite.core.model.Page
+import com.easyesuite.core.model.Payment
 import com.easyesuite.core.model.PurchaseOrder
 import com.easyesuite.core.model.SalesByItemRow
 import com.easyesuite.core.model.SalesOrderDetail
@@ -189,6 +191,38 @@ class ModelDecodingTest {
         assertEquals("Completed", t.status)
         assertEquals(2, t.totalQuantity)
         assertFalse(t.canComplete)
+    }
+
+    @Test fun `invoices decode`() {
+        val page = json.decodeFromString<Page<Invoice>>(Fixtures.read("invoices_list.json"))
+        assertEquals(866799, page.count)
+        val inv = page.results.first()
+        assertEquals("IN-884821", inv.number)
+        assertEquals("Open", inv.status)
+        assertTrue(inv.isOpen)
+        assertEquals("Macys US", inv.displayCustomer)
+        assertEquals("SO-497434", inv.salesOrderNumber)
+        assertEquals(1777611L, inv.salesOrderId)
+        assertEquals(Money(89.87), inv.totalAmount)
+        assertEquals(Money(89.87), inv.openAmount)
+        assertEquals(Money(0.0), inv.paidAmount)
+        assertEquals("Net 15", inv.termsName)
+    }
+
+    @Test fun `payments decode`() {
+        val page = json.decodeFromString<Page<Payment>>(Fixtures.read("payments_list.json"))
+        assertEquals(1644, page.count)
+        val p1 = page.results[0]
+        assertEquals("PYMT-001736", p1.number)
+        assertEquals("eBay", p1.customerName)
+        assertEquals("Wire Transfer", p1.paymentMethodName)
+        assertEquals("Cathay Bank", p1.bankName)
+        assertEquals(Money(30.89), p1.amount)
+        assertEquals(Money(108.51), p1.appliedAmount)
+        assertFalse(p1.hasUnapplied)
+        val p2 = page.results[1]
+        assertEquals(Money(183.44), p2.unappliedAmount)
+        assertTrue(p2.hasUnapplied)
     }
 
     @Test fun `user profile decodes`() {

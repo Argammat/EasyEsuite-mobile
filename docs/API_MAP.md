@@ -29,6 +29,13 @@ All paths below are relative to the **tenant root** unless noted.
 
 ## Auth
 
+**Flow (as on erp.easyesuite.com): email + password first, then pick the workspace.** The web login has no company
+field; after signing in the user chooses from their workspaces (`nationwide`, `AMA invesment Group LLC`, …) and can switch
+later from the account menu. Both SDKs do the same: `AuthService.login(email, password)` authenticates against the
+**global root** (no tenant yet), lists the workspaces, and returns `WorkspaceRequired` (or signs straight in when there is
+exactly one); `selectWorkspace(pending, slug)` stores the tenant-scoped session. A session with a blank tenant is
+"pending" and never counts as signed in.
+
 The backend team's notes: **`Authorization: Bearer <firebase_id_token>` — sign in with Firebase / Identity Platform against
 the workspace's own Firebase tenant ID.** The web app also stores `accessToken` / `refreshToken` / `access_expiration` /
 `refresh_expiration` / `firebaseTenantId` and calls `auth/token/refresh/`, so both SDKs implement two strategies behind one
@@ -40,7 +47,8 @@ the workspace's own Firebase tenant ID.** The web app also stores `accessToken` 
 | **Firebase sign‑in** | `POST https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={webApiKey}` | `{email, password, returnSecureToken:true, tenantId}` → `{idToken, refreshToken, expiresIn, localId}` | VERIFIED (Identity Platform REST); **needs the Firebase web API key** (public, ships in the web bundle) |
 | Firebase refresh | `POST https://securetoken.googleapis.com/v1/token?key={webApiKey}` | form `grant_type=refresh_token&refresh_token=…` → `{id_token, refresh_token, expires_in}` | VERIFIED (Identity Platform REST) |
 | Company → Identity tenant id | `GET {global root}clients/clients/?name={slug}` | → `{slug, display_name, firebase_tenant_id}` (parsed leniently) | **ASSUMED** — the web app stores `firebaseTenantId` per company; the endpoint that returns it must be confirmed. Fallback: build‑time `FIREBASE_TENANT_ID`, then project‑level users |
-| Login (backend‑proxied) | `POST auth/login/` | `{email, password}` → `{access, refresh, user, access_expiration, refresh_expiration}` | ASSUMED (dj‑rest‑auth; matches the keys the web app stores) |
+| Login (backend‑proxied) | `POST {global root}auth/login/` (tenant‑scoped `auth/login/` once inside a workspace) | `{email, password}` → `{access, refresh, user, access_expiration, refresh_expiration}` | ASSUMED (dj‑rest‑auth; matches the keys the web app stores). The global path is ASSUMED — login has no tenant yet |
+| Workspaces after login | `GET {global root}users/me/tenants/` (fallback: tenant‑scoped `users/me/tenants/`) | → `[{slug, display_name, …}]` parsed leniently; also read from `user.tenants` in the login response when present | ASSUMED global path (VERIFIED tenant‑scoped path). Empty list → the apps ask for the slug |
 | Login 2FA step | `POST auth/login/2fa/` | `{...challenge from step 1, otp}` → same as login | VERIFIED path, ASSUMED body |
 | Refresh (backend‑proxied) | `POST auth/token/refresh/` | `{refresh}` → `{access, access_expiration}` | VERIFIED path (seen in web traffic), ASSUMED body |
 | MFA options | `GET auth/2fa/mfa_options/`, `GET auth/mfa_settings/` | | VERIFIED paths |
@@ -73,7 +81,7 @@ session. Refresh strategy follows `Session.provider` (`firebase` / `backend`).
 | History tab | `GET items/inventory_items/{id}/history/` (or `kit_package_items` / `variant_items`) | row shape not captured → decoded leniently (`date`/`created_date`, `transaction_type`/`type`, `quantity`/`quantity_change`, `warehouse`, `memo`…) | VERIFIED path, shape ASSUMED |
 | Available qty in every warehouse | `GET items/items/{id}/available_quantity_in_warehouses/` | | VERIFIED (not used yet) |
 | **Create inventory item** | `POST items/inventory_items/` | see `CreateItemRequest` and the rules below | VERIFIED |
-| Create kit / variant | `POST items/kit_package_items/`, `POST items/variant_items/` | kit rows accept only `{inventory_item, quantity, tax_schedule}` | VERIFIED (not implemented on mobile) |
+| Create kit / variant | `POST items/kit_package_items/`, `POST items/variant_items/` | kit rows accept only `{inventory_item, quantity, tax_schedule}`; the web "Add Item ▾" menu offers Add Item / Add Kit Package / Add Variant Item | VERIFIED (designed in the mobile mockups; not implemented in the apps yet) |
 | Full save / single‑field edit | `PUT` / `PATCH items/inventory_items/{id}/` | | VERIFIED |
 | Item image upload | `POST files/images/` (multipart field `image`) → response field `image` is the URL → put it in `item_images[].image_url` | | VERIFIED |
 | Barcode lookup (prefill) | `GET items/get_item_upc/{upc}/` — **path segment, not `?upc=`** | → `{data:{upc,title,description,brand,color,size,weight,dimension,images[]}}` (rate‑limited 100/h) | VERIFIED |
@@ -140,6 +148,16 @@ Both `CreateItemRequest` models always emit the seven blocks + `marketplace_pric
 | Shipping balance | `GET shipping/balance/` | | VERIFIED path |
 
 Marketplace ids (VERIFIED): Amazon=2, eBay=4, Target=5, Best Buy=6, Macy's=7, Temu=12 (Walmart id: read from `connector-v2/accounts/`).
+
+### Sales finance (VERIFIED live, 2026‑10‑07) — the web app's Invoices and Payments pages
+
+| Purpose | Method / path | Params / fields | Status |
+|---|---|---|---|
+| Invoices | `GET sales_orders/invoices/` | `status` (Open · Paid · Partial Paid · Voided), `marketplace`, `sales_order`, `customer_id`, `search` (IN‑…), `date_after/before`, `ordering` (date, status, created_date, total_amount_with_original_currency) → `number, status, invoice_type, return_status, company_name, customer_name, sales_order_number, sales_order_id, marketplace_name, warehouse_name, shipping_method_name, po_number, date, due_date, terms_name, total_amount, open_amount, paid_amount_new, total_tax_amount, shipping_cost, total_quantity` | VERIFIED |
+| Invoice detail | `GET sales_orders/invoices/{id}/` | numeric id (not the IN‑ number) | VERIFIED |
+| Customer payments | `GET sales_orders/payments/` | `ordering=-date` → `number (PYMT‑…), status, customer_name, payment_method_name, bank_name, ref_number, check_number, memo, date, amount, applied_amount_new, un_applied_amount_new` | VERIFIED (`search` ASSUMED) |
+| Payment detail | `GET sales_orders/payments/{id}/` | | VERIFIED path |
+| Payment receipt · apply payments · pay single invoice · customer refunds | web‑only for now (`payment-receipt/new`, `apply-payment`, `pay-single-invoice`, `refund`) | MCP: `payment_receipt`, `apply_payment`, `pay_invoice`, `sales_orders_customer_refunds` | not on mobile yet |
 
 ## Dashboard & reports
 

@@ -37,6 +37,9 @@ public struct Session: Codable, Equatable, Sendable {
         firebaseTenantId = try c.decodeIfPresent(String.self, forKey: .firebaseTenantId)
     }
 
+    /// Tokens minted but no workspace chosen yet (login is email + password; the company comes after).
+    public var isPending: Bool { tenant.trimmingCharacters(in: .whitespaces).isEmpty }
+
     /// True when the access token expires within `skew` seconds (or already has). Unknown expiry → false.
     public func isAccessExpiring(skew: TimeInterval = 60, now: Date = Date()) -> Bool {
         guard let exp = DateText.parse(accessExpiration) else { return false }
@@ -74,6 +77,8 @@ public struct TokenResponse: Decodable, Sendable {
     public var token: String?
     public var accessExpiration: String?
     public var refreshExpiration: String?
+    /// The user object some login responses carry (may list the user's tenants).
+    public var user: JSONValue?
     public var mfaRequired: Bool?
     public var requires2Fa: Bool?   // convertFromSnakeCase maps requires_2fa → requires2Fa
     public var ephemeralToken: String?
@@ -100,4 +105,7 @@ public struct RefreshRequest: Encodable, Sendable { public var refresh: String }
 public enum LoginResult: Sendable {
     case success(Session)
     case secondFactorRequired(challengeToken: String?, message: String?)
+    /// Signed in, now pick the company. `pending` holds the tokens (tenant blank); `workspaces` is what the
+    /// backend listed — empty when the list endpoint is unknown, in which case the UI asks for the slug.
+    case workspaceRequired(pending: Session, workspaces: [TenantInfo])
 }

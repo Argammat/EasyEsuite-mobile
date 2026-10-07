@@ -2,10 +2,10 @@ package com.easyesuite.app.ui
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.MoreHoriz
-import androidx.compose.material.icons.filled.Receipt
+import androidx.compose.material.icons.filled.ShoppingCart
 import androidx.compose.material.icons.filled.Warehouse
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -86,10 +86,10 @@ object Routes {
 private data class Tab(val route: String, val label: String, val icon: ImageVector)
 
 private val tabs = listOf(
-    Tab(Routes.HOME, "Home", Icons.Default.Home),
+    Tab(Routes.HOME, "Dashboard", Icons.Default.Dashboard),
     Tab(Routes.ITEMS, "Items", Icons.Default.Inventory2),
     Tab(Routes.INVENTORY, "Inventory", Icons.Default.Warehouse),
-    Tab(Routes.ORDERS, "Orders", Icons.Default.Receipt),
+    Tab(Routes.ORDERS, "Ecommerce", Icons.Default.ShoppingCart),
     Tab(Routes.MORE, "More", Icons.Default.MoreHoriz),
 )
 

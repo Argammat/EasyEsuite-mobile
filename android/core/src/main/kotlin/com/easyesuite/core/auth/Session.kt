@@ -20,6 +20,9 @@ data class Session(
     /** Identity Platform tenant the user signed in against (Firebase flow only); kept so the next launch reuses it. */
     @SerialName("firebase_tenant_id") val firebaseTenantId: String? = null,
 ) {
+    /** Tokens minted but no workspace chosen yet (login is email + password; the company comes after). */
+    val isPending: Boolean get() = tenant.isBlank()
+
     /** True when the access token expires within [skewSeconds] (or already has). Unknown expiry → false. */
     fun isAccessExpiring(skewSeconds: Long = 60, now: java.time.Instant = java.time.Instant.now()): Boolean {
         val exp = com.easyesuite.core.util.DateText.parse(accessExpiration) ?: return false
@@ -93,4 +96,9 @@ data class RefreshRequest(val refresh: String)
 sealed class LoginResult {
     data class Success(val session: Session) : LoginResult()
     data class SecondFactorRequired(val challengeToken: String?, val message: String?) : LoginResult()
+    /**
+     * Signed in, now pick the company. [pending] holds the tokens (tenant blank); [workspaces] is what the
+     * backend listed — empty when the list endpoint is unknown, in which case the UI asks for the slug.
+     */
+    data class WorkspaceRequired(val pending: Session, val workspaces: List<com.easyesuite.core.model.TenantInfo>) : LoginResult()
 }

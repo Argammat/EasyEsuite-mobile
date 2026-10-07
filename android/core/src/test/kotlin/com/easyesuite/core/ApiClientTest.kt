@@ -178,6 +178,39 @@ class ApiClientTest {
         assertEquals("Test Test", auth.me().displayName)
     }
 
+    @Test fun `email-password login without a tenant leads to the workspace picker`() = runTest {
+        store.clear()
+        val global = ApiClient(ApiConfig(tenant = "", apiRoot = server.url("/").toString()), store)
+        server.enqueue(MockResponse().setBody("""{"access":"a1","refresh":"r1","access_expiration":"2099-01-01T00:00:00Z"}"""))
+        server.enqueue(MockResponse().setBody("""{"results":[{"slug":"nationwide","display_name":"Nationwide"},{"slug":"ama","display_name":"AMA invesment Group LLC"}]}"""))
+        val auth = AuthService(global)
+        val result = auth.login("am@example.com", "pw")
+        assertEquals("/api/v1/auth/login/", server.takeRequest().path)          // global root — no tenant yet
+        val tenants = server.takeRequest()
+        assertEquals("/api/v1/users/me/tenants/", tenants.path)
+        assertEquals("Bearer a1", tenants.getHeader("Authorization"))             // pending tokens authenticate the list
+        assertTrue(result is LoginResult.WorkspaceRequired)
+        val choose = result as LoginResult.WorkspaceRequired
+        assertEquals(listOf("nationwide", "ama"), choose.workspaces.map { it.slug })
+        assertTrue(store.load()!!.isPending)
+        assertFalse(auth.isSignedIn)
+
+        val session = auth.selectWorkspace(choose.pending, "Nationwide")
+        assertEquals("nationwide", session.tenant)
+        assertEquals("nationwide", store.load()!!.tenant)
+        assertTrue(auth.isSignedIn)
+    }
+
+    @Test fun `a single workspace signs straight in`() = runTest {
+        store.clear()
+        val global = ApiClient(ApiConfig(tenant = "", apiRoot = server.url("/").toString()), store)
+        server.enqueue(MockResponse().setBody("""{"access":"a1","refresh":"r1","access_expiration":"2099-01-01T00:00:00Z"}"""))
+        server.enqueue(MockResponse().setBody("""[{"slug":"nationwide","name":"Nationwide"}]"""))
+        val result = AuthService(global).login("am@example.com", "pw")
+        assertTrue(result is LoginResult.Success)
+        assertEquals("nationwide", (result as LoginResult.Success).session.tenant)
+    }
+
     @Test fun `login surfaces a second-factor challenge`() = runTest {
         store.clear()
         server.enqueue(MockResponse().setBody("""{"mfa_required":true,"ephemeral_token":"eph-1","detail":"Enter the code from your authenticator"}"""))

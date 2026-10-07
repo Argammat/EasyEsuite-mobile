@@ -175,7 +175,7 @@ struct ShipmentDetailView: View {
                 ForEach(model.rates) { r in
                     Button { model.selectedRate = r.id } label: {
                         HStack {
-                            Image(systemName: model.selectedRate == r.id ? "largecircle.fill.circle" : "circle").foregroundStyle(Brand.blue)
+                            Image(systemName: model.selectedRate == r.id ? "largecircle.fill.circle" : "circle").foregroundStyle(Brand.greenDeep)
                             VStack(alignment: .leading) {
                                 Text(r.label).font(.subheadline.weight(.medium))
                                 if let d = r.days { Text("\(d) day\(d == 1 ? "" : "s")").font(.caption).foregroundStyle(.secondary) }

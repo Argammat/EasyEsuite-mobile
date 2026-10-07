@@ -177,6 +177,46 @@ final class APIClientTests: XCTestCase {
         XCTAssertTrue(Session(tenant: "d", access: "a", accessExpiration: "2020-01-01T00:00:00Z").isAccessExpiring())
     }
 
+    func testEmailPasswordLoginWithoutTenantLeadsToWorkspacePicker() async throws {
+        store.clear()
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        let global = APIClient(config: ApiConfig(tenant: ""), tokenStore: store, urlSession: URLSession(configuration: cfg))
+        MockURLProtocol.handler = { req in
+            let u = req.url!.absoluteString
+            if u.hasSuffix("/api/v1/auth/login/") { return (200, Data(#"{"access":"a1","refresh":"r1","access_expiration":"2099-01-01T00:00:00Z"}"#.utf8)) }
+            if u.hasSuffix("/api/v1/users/me/tenants/") { return (200, Data(#"{"results":[{"slug":"nationwide","display_name":"Nationwide"},{"slug":"ama","display_name":"AMA invesment Group LLC"}]}"#.utf8)) }
+            return (404, Data())
+        }
+        let auth = AuthService(client: global)
+        let result = try await auth.login(email: "am@example.com", password: "pw")
+        XCTAssertEqual(MockURLProtocol.requests[0].url?.absoluteString, "https://api-new.easyesuite.com/api/v1/auth/login/")   // global root — no tenant yet
+        XCTAssertEqual(MockURLProtocol.requests[1].url?.absoluteString, "https://api-new.easyesuite.com/api/v1/users/me/tenants/")
+        XCTAssertEqual(MockURLProtocol.requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer a1")        // pending tokens authenticate the list
+        guard case .workspaceRequired(let pending, let workspaces) = result else { return XCTFail("expected workspace picker") }
+        XCTAssertEqual(workspaces.map(\.slug), ["nationwide", "ama"])
+        XCTAssertTrue(store.load()?.isPending == true)
+        XCTAssertFalse(auth.isSignedIn)
+
+        let session = auth.selectWorkspace(pending, tenant: "Nationwide")
+        XCTAssertEqual(session.tenant, "nationwide")
+        XCTAssertEqual(store.load()?.tenant, "nationwide")
+        XCTAssertTrue(auth.isSignedIn)
+    }
+
+    func testSingleWorkspaceSignsStraightIn() async throws {
+        store.clear()
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        let global = APIClient(config: ApiConfig(tenant: ""), tokenStore: store, urlSession: URLSession(configuration: cfg))
+        MockURLProtocol.handler = { req in
+            if req.url!.absoluteString.hasSuffix("/auth/login/") { return (200, Data(#"{"access":"a1","refresh":"r1"}"#.utf8)) }
+            return (200, Data(#"[{"slug":"nationwide","name":"Nationwide"}]"#.utf8))
+        }
+        guard case .success(let session) = try await AuthService(client: global).login(email: "am@example.com", password: "pw") else { return XCTFail("expected success") }
+        XCTAssertEqual(session.tenant, "nationwide")
+    }
+
     func testLoginStoresSessionAndSecondFactorIsSurfaced() async throws {
         store.clear()
         let me = try fixture("users_me")

@@ -193,8 +193,8 @@ struct NewItemView: View {
                     HStack(spacing: 8) {
                         ForEach(model.photos) { p in
                             Thumb(url: p.url, size: 84)
-                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(p.selected ? Brand.blue : Color.clear, lineWidth: 2))
-                                .overlay(alignment: .topTrailing) { if p.selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(Brand.blue).padding(4) } }
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(p.selected ? Brand.green : Color.clear, lineWidth: 2))
+                                .overlay(alignment: .topTrailing) { if p.selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(Brand.greenDeep).padding(4) } }
                                 .onTapGesture { model.togglePhoto(p.url) }
                         }
                         VStack(spacing: 6) {

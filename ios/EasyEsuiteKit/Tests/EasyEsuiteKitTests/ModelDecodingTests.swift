@@ -190,4 +190,34 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertNotNil(DateText.parse("2026-09-03 16:14:32.325946+00:00"))
         XCTAssertNotNil(DateText.parse("2026-09-24"))
     }
+
+    func testInvoicesDecode() throws {
+        let page = try decoder.decode(Page<Invoice>.self, from: fixture("invoices_list"))
+        XCTAssertEqual(page.count, 866799)
+        let inv = try XCTUnwrap(page.results.first)
+        XCTAssertEqual(inv.number, "IN-884821")
+        XCTAssertEqual(inv.status, "Open")
+        XCTAssertTrue(inv.isOpen)
+        XCTAssertEqual(inv.displayCustomer, "Macys US")
+        XCTAssertEqual(inv.salesOrderNumber, "SO-497434")
+        XCTAssertEqual(inv.salesOrderId, 1777611)
+        XCTAssertEqual(try XCTUnwrap(inv.totalAmount).doubleValue, 89.87, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(inv.paidAmountNew).doubleValue, 0, accuracy: 0.001)
+        XCTAssertEqual(inv.termsName, "Net 15")
+    }
+
+    func testPaymentsDecode() throws {
+        let page = try decoder.decode(Page<Payment>.self, from: fixture("payments_list"))
+        XCTAssertEqual(page.count, 1644)
+        let p1 = page.results[0]
+        XCTAssertEqual(p1.number, "PYMT-001736")
+        XCTAssertEqual(p1.customerName, "eBay")
+        XCTAssertEqual(p1.paymentMethodName, "Wire Transfer")
+        XCTAssertEqual(p1.bankName, "Cathay Bank")
+        XCTAssertEqual(try XCTUnwrap(p1.amount).doubleValue, 30.89, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(p1.appliedAmountNew).doubleValue, 108.51, accuracy: 0.001)
+        XCTAssertFalse(p1.hasUnapplied)
+        XCTAssertEqual(try XCTUnwrap(page.results[1].unAppliedAmountNew).doubleValue, 183.44, accuracy: 0.001)
+        XCTAssertTrue(page.results[1].hasUnapplied)
+    }
 }

@@ -92,6 +92,8 @@ object Endpoints {
 
     // Orders & shipping
     const val SALES_ORDERS = "sales_orders/sales_orders/"
+    const val INVOICES = "sales_orders/invoices/"
+    const val PAYMENTS = "sales_orders/payments/"
     const val FULFILLMENTS = "sales_orders/fulfillments/"
     const val SHIPMENTS = "shipping/shipments/"
     const val SHIPMENT_RESOLVE_BARCODE = "shipping/shipments/resolve_barcode/"

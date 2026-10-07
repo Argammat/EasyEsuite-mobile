@@ -203,6 +203,9 @@ class ApiClient(
 
     data class RawResult(val status: Int, val body: String?)
 
+    /** Absolute URL under the global (tenant-less) root — for the calls made before a workspace is chosen. */
+    fun globalPath(path: String): String = config.globalRoot + path.trimStart('/')
+
     fun buildUrl(path: String, query: Map<String, Any?>): HttpUrl {
         val base = if (path.startsWith("http")) path else config.tenantRoot + path.trimStart('/')
         val builder = base.toHttpUrl().newBuilder()

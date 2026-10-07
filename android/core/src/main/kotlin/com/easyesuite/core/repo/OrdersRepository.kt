@@ -4,7 +4,9 @@ import com.easyesuite.core.Endpoints
 import com.easyesuite.core.model.BuyLabelRequest
 import com.easyesuite.core.model.FulfillRequest
 import com.easyesuite.core.model.HoldRequest
+import com.easyesuite.core.model.Invoice
 import com.easyesuite.core.model.Page
+import com.easyesuite.core.model.Payment
 import com.easyesuite.core.model.PageQuery
 import com.easyesuite.core.model.SalesOrderDetail
 import com.easyesuite.core.model.SalesOrderSummary
@@ -44,6 +46,35 @@ class OrdersRepository(private val client: ApiClient) {
     }
 
     suspend fun order(id: Long): SalesOrderDetail = client.get("${Endpoints.SALES_ORDERS}$id/")
+
+    // ---- Sales finance (VERIFIED): invoices and customer payments -------------------------------
+
+    /** `sales_orders/invoices/` — filters: status (Open|Paid|Partial Paid|Voided), marketplace, sales_order, search (IN-…), date_after/before. */
+    suspend fun invoices(
+        status: String? = null,
+        search: String? = null,
+        salesOrderId: Long? = null,
+        range: DateRange? = null,
+        page: PageQuery = PageQuery(),
+    ): Page<Invoice> = client.get(
+        Endpoints.INVOICES,
+        page.asMap() + mapOf(
+            "status" to status,
+            "search" to search?.takeIf { it.isNotBlank() },
+            "sales_order" to salesOrderId,
+            "ordering" to "-date",
+        ) + (range?.toQuery() ?: emptyMap()),
+    )
+
+    suspend fun invoice(id: Long): Invoice = client.get("${Endpoints.INVOICES}$id/")
+
+    /** `sales_orders/payments/` — customer payments, newest first. `search` is ASSUMED (payment number / ref). */
+    suspend fun payments(search: String? = null, range: DateRange? = null, page: PageQuery = PageQuery()): Page<Payment> = client.get(
+        Endpoints.PAYMENTS,
+        page.asMap() + mapOf("search" to search?.takeIf { it.isNotBlank() }, "ordering" to "-date") + (range?.toQuery() ?: emptyMap()),
+    )
+
+    suspend fun payment(id: Long): Payment = client.get("${Endpoints.PAYMENTS}$id/")
 
     suspend fun findByNumber(number: String): SalesOrderSummary? {
         val p: Page<SalesOrderSummary> = client.get(Endpoints.SALES_ORDERS, mapOf("number" to number.trim(), "limit" to 1))

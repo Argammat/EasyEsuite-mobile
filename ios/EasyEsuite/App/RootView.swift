@@ -37,13 +37,13 @@ struct MainTabs: View {
     var body: some View {
         TabView {
             RoutedStack(graph: graph) { DashboardView(graph: graph) }
-                .tabItem { Label("Home", systemImage: "house.fill") }
+                .tabItem { Label("Dashboard", systemImage: "square.grid.2x2.fill") }
             RoutedStack(graph: graph) { ItemsView(graph: graph) }
                 .tabItem { Label("Items", systemImage: "shippingbox.fill") }
             RoutedStack(graph: graph) { InventoryView(graph: graph) }
                 .tabItem { Label("Inventory", systemImage: "building.2.fill") }
             RoutedStack(graph: graph) { OrdersView(graph: graph) }
-                .tabItem { Label("Orders", systemImage: "list.bullet.rectangle.fill") }
+                .tabItem { Label("Ecommerce", systemImage: "cart.fill") }
             RoutedStack(graph: graph) { MoreView(graph: graph) }
                 .tabItem { Label("More", systemImage: "ellipsis.circle.fill") }
         }

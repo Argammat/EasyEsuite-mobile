@@ -56,7 +56,7 @@ Access tokens are renewed ~60 s before `access_expiration` (Firebase ID tokens l
 
 ## First run checklist
 
-1. Sign in with **company = your tenant slug** (e.g. `nationwide`), email, password.
+1. Sign in with your **email and password**, then pick the workspace (e.g. `nationwide`) — the same flow as erp.easyesuite.com. With one workspace the picker is skipped; "Switch workspace" lives in Settings.
 2. If login fails with a 404 → the login path differs; fix `Endpoints.LOGIN` in `ApiConfig.kt`.
    If it returns 200 but the app says "no access token" → map the field names in `auth/Session.kt` → `TokenResponse`.
    If the team confirms Firebase sign-in, set the two build settings above instead.

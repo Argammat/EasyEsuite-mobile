@@ -171,7 +171,7 @@ struct ItemPickerSection<M: LinePickerModel>: View {
                                 ForEach(reasons, id: \.self) { r in
                                     let on = line.reason == r
                                     Button { if let i = model.lines.firstIndex(where: { $0.id == line.id }) { model.lines[i].reason = r } } label: {
-                                        Text(r).font(.caption).padding(.horizontal, 8).padding(.vertical, 4).background(on ? Brand.blue : Color(.secondarySystemBackground)).foregroundStyle(on ? .white : .primary).clipShape(Capsule())
+                                        Text(r).font(.caption).padding(.horizontal, 8).padding(.vertical, 4).background(on ? Brand.greenTint : Color(.secondarySystemBackground)).foregroundStyle(on ? Brand.greenText : .primary).fontWeight(on ? .semibold : .regular).clipShape(Capsule())
                                     }.buttonStyle(.plain)
                                 }
                             }

@@ -159,7 +159,7 @@ func statusColor(_ status: String?) -> Color {
     guard let s = status?.lowercased() else { return .gray }
     if s.contains("void") || s.contains("exception") { return Brand.red }
     if s.contains("pending") || s.contains("partial") || s.contains("hold") || s == "to_ship" || s == "open" { return Brand.amber }
-    if s.contains("invoiced") || s.contains("fulfilled") || s.contains("completed") || s == "shipped" || s == "billed" || s.contains("received/pending") { return Brand.green }
+    if s.contains("invoiced") || s.contains("fulfilled") || s.contains("completed") || s == "shipped" || s == "billed" || s == "paid" || s.contains("received/pending") { return Brand.green }
     return Brand.blue
 }
 
@@ -224,8 +224,9 @@ struct ChipRow<Value: Hashable>: View {
                     Button { onSelect(opt.0) } label: {
                         Text(opt.1).font(.subheadline)
                             .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(on ? Brand.blue : Color(.secondarySystemBackground))
-                            .foregroundStyle(on ? Color.white : Color.primary)
+                            .background(on ? Brand.greenTint : Color(.secondarySystemBackground))
+                            .foregroundStyle(on ? Brand.greenText : Color.primary)
+                            .fontWeight(on ? .semibold : .regular)
                             .clipShape(Capsule())
                     }.buttonStyle(.plain)
                 }
@@ -243,8 +244,9 @@ struct FilterChip: View {
         Button(action: action) {
             Text(label).font(.subheadline)
                 .padding(.horizontal, 12).padding(.vertical, 6)
-                .background(selected ? Brand.blue : Color(.secondarySystemBackground))
-                .foregroundStyle(selected ? Color.white : Color.primary)
+                .background(selected ? Brand.greenTint : Color(.secondarySystemBackground))
+                .foregroundStyle(selected ? Brand.greenText : Color.primary)
+                .fontWeight(selected ? .semibold : .regular)
                 .clipShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -253,7 +255,7 @@ struct FilterChip: View {
 
 struct SectionHeader: View {
     let text: String
-    var body: some View { Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(Brand.blue).padding(.top, 8) }
+    var body: some View { Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(Brand.ink).padding(.top, 8) }
 }
 
 struct StatTile: View {

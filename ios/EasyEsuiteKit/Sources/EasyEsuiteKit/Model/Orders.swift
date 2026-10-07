@@ -285,3 +285,61 @@ extension String {
     public var nilIfEmpty: String? { isEmpty ? nil : self }
     public var nilIfBlank: String? { trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self }
 }
+
+
+// MARK: - Sales finance (VERIFIED against the live API, Oct 2026)
+
+/// Statuses of `sales_orders/invoices/`.
+public enum InvoiceStatus {
+    public static let open = "Open", paid = "Paid", partialPaid = "Partial Paid", voided = "Voided"
+    public static let all = [open, paid, partialPaid, voided]
+}
+
+/// Row of `sales_orders/invoices/` — the billing document for a sales order.
+public struct Invoice: Decodable, Identifiable, Hashable, Sendable {
+    public var id: Int64
+    public var number: String
+    public var status: String
+    public var invoiceType: String?
+    public var returnStatus: String?
+    public var companyName: String?
+    public var customerName: String?
+    public var salesOrderNumber: String?
+    public var salesOrderId: Int64?
+    public var marketplaceName: String?
+    public var warehouseName: String?
+    public var shippingMethodName: String?
+    public var trackingNumber: String?
+    public var termsName: String?
+    public var poNumber: String?
+    public var date: String?
+    public var dueDate: String?
+    public var totalQuantity: Int?
+    public var totalAmount: Money?
+    public var openAmount: Money?
+    public var paidAmountNew: Money?
+    public var totalTaxAmount: Money?
+    public var shippingCost: Money?
+
+    public var displayCustomer: String { companyName?.nilIfBlank ?? customerName ?? "—" }
+    public var isOpen: Bool { status == InvoiceStatus.open || status == InvoiceStatus.partialPaid }
+}
+
+/// Row of `sales_orders/payments/` — a customer payment (wire, check, card) and how much of it is applied.
+public struct Payment: Decodable, Identifiable, Hashable, Sendable {
+    public var id: Int64
+    public var number: String
+    public var status: String
+    public var customerName: String?
+    public var paymentMethodName: String?
+    public var bankName: String?
+    public var refNumber: String?
+    public var checkNumber: String?
+    public var memo: String?
+    public var date: String?
+    public var amount: Money?
+    public var appliedAmountNew: Money?
+    public var unAppliedAmountNew: Money?
+
+    public var hasUnapplied: Bool { unAppliedAmountNew.map { !$0.isZero } ?? false }
+}

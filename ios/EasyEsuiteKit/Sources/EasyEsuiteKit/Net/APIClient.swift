@@ -156,6 +156,11 @@ public final class APIClient: @unchecked Sendable {
         try await send("POST", url: url(path, query: [:]), body: body, contentType: "application/json", token: nil)
     }
 
+    /// Absolute URL string under the global (tenant-less) root — for the calls made before a workspace is chosen.
+    public func globalPath(_ path: String) -> String {
+        config.globalRoot.appendingPathComponent(path.hasPrefix("/") ? String(path.dropFirst()) : path, isDirectory: path.hasSuffix("/")).absoluteString
+    }
+
     public func url(_ path: String, query: [String: Any?]) -> URL {
         let base: URL = path.hasPrefix("http") ? URL(string: path)! : URL(string: path, relativeTo: config.tenantRoot)!.absoluteURL
         var comps = URLComponents(url: base, resolvingAgainstBaseURL: false)!

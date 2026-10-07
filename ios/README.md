@@ -54,7 +54,7 @@ Access tokens are renewed ~60 s before `access_expiration` (Firebase ID tokens l
 
 ## First run checklist
 
-1. Sign in with **company = your tenant slug** (e.g. `nationwide`), email, password.
+1. Sign in with your **email and password**, then pick the workspace (e.g. `nationwide`) — the same flow as erp.easyesuite.com. With one workspace the picker is skipped; "Switch workspace" lives in Settings.
 2. 404 on login → fix `Endpoints.login` in `ApiConfig.swift`. 200 but "no access token" → map the field names in `Auth/Session.swift` → `TokenResponse`.
    If the team confirms Firebase sign-in, set the build settings above instead.
 3. Confirm the **ASSUMED** rows in `../docs/API_MAP.md` with one DevTools capture; each lives in one `*Request` struct.

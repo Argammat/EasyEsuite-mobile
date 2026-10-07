@@ -98,7 +98,7 @@ fun statusColor(status: String?): Color = when {
     status == null -> Color.Gray
     status.contains("Voided", true) || status.contains("exception", true) -> Red
     status.contains("Pending", true) || status.contains("Partial", true) || status.contains("hold", true) || status == "to_ship" || status == "Open" -> Amber
-    status.contains("Invoiced", true) || status.contains("Fulfilled", true) || status.contains("Completed", true) || status == "shipped" || status == "Billed" || status == "Received/Pending Billing" -> Green
+    status.contains("Invoiced", true) || status.contains("Fulfilled", true) || status.contains("Completed", true) || status == "shipped" || status == "Billed" || status == "Paid" || status == "Received/Pending Billing" -> Green
     else -> Blue
 }
 
