@@ -12,6 +12,9 @@ open EasyEsuite.xcodeproj      # set your team in Signing & Capabilities, run on
 cd EasyEsuiteKit && swift test # SDK tests
 ```
 
+Shipping to testers: **[docs/TESTFLIGHT.md](../docs/TESTFLIGHT.md)** — a GitHub Actions workflow (`TestFlight`) archives, signs and uploads
+to App Store Connect; `scripts/asc-bootstrap.py` does the one-time certificate/profile setup without a Mac.
+
 ## Layout
 
 ```
@@ -26,7 +29,7 @@ EasyEsuiteKit/Sources/EasyEsuiteKit/
 EasyEsuite/
   App/                   AppContainer (one graph per tenant), RootView (Route enum, tabs), EasyEsuiteApp
   Common/UI.swift        PagedListModel/PagedListView, Thumb, StatusChip, KeyValueRow, ChipRow, StatTile, toast
-  Features/Auth          LoginView (company + email + password, 2FA step)
+  Features/Auth          LoginView (email + password → 2FA → workspace picker)
   Features/Items         ItemsView, ItemDetailView (stock by warehouse), NewItemView (UPC prefill, photos, opening stock)
   Features/Inventory     InventoryView, TransfersView (+NewTransferView), ReceiveView, AdjustView
   Features/Orders        OrdersView (orders | shipments), OrderDetailView (fulfil, memo), ShipmentDetailView (rates → buy, hold, tracking, verify)
@@ -35,6 +38,10 @@ EasyEsuite/
   Features/Assistant     AssistantView (Copilot chat)
   Features/More          MoreView, SettingsView (sign out)
   Scanner/               ScannerSheet (AVFoundation), ScanResultView (item / shipment / order / create)
+  Resources/             Assets (AppIcon, Logo), Info.plist (generated), PrivacyInfo.xcprivacy
+
+ExportOptions.plist      App Store Connect upload options used by the TestFlight workflow
+scripts/asc-bootstrap.py One-time App Store Connect setup (bundle ID, distribution certificate, profile)
 ```
 
 ## Sign-in configuration

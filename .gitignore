@@ -10,6 +10,11 @@ android/captures/
 android/app/release/
 
 # iOS
+# ios/scripts/asc-bootstrap.py output: private signing key — never commit
+asc-out/
+*.p12
+*.mobileprovision
+AuthKey_*.p8
 ios/*.xcodeproj/
 ios/*.xcworkspace/
 ios/**/xcuserdata/

@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <!-- Simple "E" + box mark; replace with the brand asset. -->
-    <path android:fillColor="#FFFFFF" android:pathData="M34,30h40v8h-30v10h26v8h-26v12h30v8h-40z" />
-    <path android:fillColor="#2DB682" android:pathData="M28,70l-6,0l0,-34l6,0z" />
-</vector>
