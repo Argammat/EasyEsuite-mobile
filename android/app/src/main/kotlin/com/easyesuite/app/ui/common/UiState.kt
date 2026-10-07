@@ -54,7 +54,8 @@ abstract class PagedListViewModel<T>(private val pageSize: Int = 25) : ViewModel
 
     protected abstract suspend fun fetch(page: PageQuery): Page<T>
 
-    fun refresh() = load(reset = true)
+    /** Open so a screen can refresh companion data (totals, counts) alongside the list. */
+    open fun refresh() { load(reset = true) }
 
     fun loadMore() {
         val s = _state.value

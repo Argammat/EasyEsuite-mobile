@@ -22,12 +22,17 @@ final class NewItemModel: ObservableObject {
     @Published var height = ""
     @Published var dimensionUnit = "Inches"
     @Published var reorderPoint = ""
-    @Published var conditionNew = true
+    /// Id from `items/item_conditions/`; nil = let the backend default.
+    @Published var conditionId: Int?
+    /// Id from `items/tax_schedules/`; nil = let the backend default.
+    @Published var taxScheduleId: Int?
     @Published var initialQty = ""
     @Published var warehouseId: Int?
     // State
     @Published var photos: [PhotoEntry] = []
     @Published var warehouses: [Warehouse] = []
+    @Published var conditions: [ItemCondition] = []
+    @Published var taxSchedules: [TaxSchedule] = []
     @Published var lookingUp = false
     @Published var lookupMessage: String?
     @Published var uploading = false
@@ -49,6 +54,19 @@ final class NewItemModel: ObservableObject {
                 if warehouseId == nil { warehouseId = list.first(where: \.default)?.id ?? list.first?.id }
             }
             if !(initialUpc ?? "").isEmpty { await lookupUpc() }
+        }
+        // Form dropdowns (`items/item_conditions/`, `items/tax_schedules/`). Defaults: the "New" condition, the default schedule.
+        Task {
+            if let list = try? await graph.items.conditions() {
+                conditions = list
+                if conditionId == nil { conditionId = (list.first { $0.name?.caseInsensitiveCompare("new") == .orderedSame } ?? list.first)?.id }
+            }
+        }
+        Task {
+            if let list = try? await graph.items.taxSchedules() {
+                taxSchedules = list
+                if taxScheduleId == nil { taxScheduleId = (list.first { $0.isDefault == true } ?? list.first)?.id }
+            }
         }
     }
 
@@ -120,7 +138,8 @@ final class NewItemModel: ObservableObject {
         req.length = length.nilIfBlank; req.width = width.nilIfBlank; req.height = height.nilIfBlank
         req.dimensionUnit = [length, width, height].contains { !$0.isEmpty } ? dimensionUnit : nil
         req.reorderPoint = Int(reorderPoint)
-        req.itemCondition = conditionNew ? 1 : nil
+        req.itemCondition = conditionId
+        req.taxSchedule = taxScheduleId
         req.salesDescription = description.nilIfBlank
         req.itemImages = photos.filter(\.selected).map { ItemImage(imageUrl: $0.url) }
         do {
@@ -199,7 +218,14 @@ struct NewItemView: View {
                 TextField("Platform", text: $model.platform)
                 TextField("Manufacturer", text: $model.manufacturer)
                 TextField("Description", text: $model.description, axis: .vertical).lineLimit(3...6)
-                Picker("Condition", selection: $model.conditionNew) { Text("New").tag(true); Text("Other / set later").tag(false) }.pickerStyle(.segmented)
+                Picker("Condition", selection: $model.conditionId) {
+                    Text("—").tag(Int?.none)
+                    ForEach(model.conditions) { Text($0.displayName).tag(Optional($0.id)) }
+                }
+                Picker("Tax schedule", selection: $model.taxScheduleId) {
+                    Text("—").tag(Int?.none)
+                    ForEach(model.taxSchedules) { Text($0.displayName).tag(Optional($0.id)) }
+                }
             }
 
             Section("Cost & stock") {
@@ -248,7 +274,7 @@ struct NewItemView: View {
             Button("OK") { let id = model.created?.id; model.stockWarning = nil; navigateTo = id }
         } message: { Text(model.stockWarning ?? "") }
         .navigationDestination(isPresented: Binding(get: { navigateTo != nil }, set: { if !$0 { navigateTo = nil } })) {
-            if let id = navigateTo { ItemDetailView(graph: model.graph, id: id) }
+            if let id = navigateTo { ItemDetailView(graph: model.graph, id: id, itemType: model.created?.itemType) }
         }
     }
 

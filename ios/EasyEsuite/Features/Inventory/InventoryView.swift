@@ -11,6 +11,10 @@ enum StockRowModel: Identifiable {
     }
 }
 
+/// Company view = `items/inventory_items/` (+ `get_inventory_totalization/`);
+/// warehouse view = `items/warehouse_inventory_items/?warehouse_id=` (+ `totalization/`).
+/// `search` and `is_available` are server-side; "below reorder point" is the only client-side filter
+/// (the API has no parameter for it).
 @MainActor
 final class InventoryModel: PagedListModel<StockRowModel> {
     let graph: AppContainer.Graph
@@ -19,7 +23,10 @@ final class InventoryModel: PagedListModel<StockRowModel> {
     @Published var lowStockOnly = false { didSet { refresh() } }
     @Published var warehouses: [Warehouse] = []
     @Published var warehouseId: Int? { didSet { refresh() } }
+    /// Totals strip above the list; nil while loading, empty when the endpoint returned nothing usable.
+    @Published var totals: [DashboardCard]?
     private var bag = Set<AnyCancellable>()
+    private var totalsTask: Task<Void, Never>?
 
     init(graph: AppContainer.Graph) {
         self.graph = graph
@@ -30,13 +37,32 @@ final class InventoryModel: PagedListModel<StockRowModel> {
         Task { warehouses = (try? await graph.items.warehouses()) ?? [] }
     }
 
+    override func refresh() {
+        super.refresh()
+        loadTotals()
+    }
+
+    private func loadTotals() {
+        totalsTask?.cancel()
+        totals = nil
+        let wh = warehouseId, query = search.query, available = availableOnly
+        totalsTask = Task { [weak self] in
+            guard let self else { return }
+            let cards: [DashboardCard]
+            if let wh {
+                cards = (try? await self.graph.items.warehouseTotals(warehouseId: wh, availableOnly: available)) ?? []
+            } else {
+                cards = (try? await self.graph.items.inventoryTotals(search: query, availableOnly: available)) ?? []
+            }
+            if Task.isCancelled { return }
+            self.totals = Array(cards.filter { $0.numeric != nil }.prefix(6))
+        }
+    }
+
     override func fetch(_ page: PageQuery) async throws -> Page<StockRowModel> {
         if let wh = warehouseId {
-            let p = try await graph.items.stockInWarehouse(wh, search: search.query, page: page)
-            let rows = p.results
-                .filter { !availableOnly || $0.onHand > 0 }
-                .filter { !lowStockOnly || $0.belowReorderPoint }
-                .map(StockRowModel.perWarehouse)
+            let p = try await graph.items.stockInWarehouse(wh, search: search.query, availableOnly: availableOnly, page: page)
+            let rows = p.results.filter { !lowStockOnly || $0.belowReorderPoint }.map(StockRowModel.perWarehouse)
             return Page(count: p.count, next: p.next, previous: p.previous, results: rows)
         }
         let p = try await graph.items.inventory(search: search.query, availableOnly: availableOnly, page: page)
@@ -75,12 +101,27 @@ struct InventoryView: View {
                     chip("In stock", on: model.availableOnly) { model.availableOnly.toggle() }
                     chip("Below reorder point", on: model.lowStockOnly) { model.lowStockOnly.toggle() }
                 }
+                if let totals = model.totals, !totals.isEmpty {
+                    // Company-wide or per-warehouse totals (`get_inventory_totalization/` / `totalization/`).
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(totals) { c in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(c.label).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                    Text(c.value).font(.subheadline.weight(.semibold)).lineLimit(1)
+                                }
+                                .padding(.horizontal, 12).padding(.vertical, 8)
+                                .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                            }
+                        }
+                    }
+                }
             }
             .listRowSeparator(.hidden)
         }) { row in
             switch row {
             case .company(let item):
-                NavigationLink(value: Route.item(item.id)) {
+                NavigationLink(value: Route.item(item.id, type: item.itemType)) {
                     EntityRow(imageUrl: item.primaryImage, title: item.name, subtitle: [item.marketplaceTitle, item.upcCode].compactMap { $0 }.joined(separator: " · "),
                               badge: item.belowReorderPoint ? "Below reorder point (\(item.reorderPoint ?? 0))" : nil) {
                         Text("\(item.available)").font(.headline).foregroundStyle(item.belowReorderPoint ? Brand.amber : Brand.green)

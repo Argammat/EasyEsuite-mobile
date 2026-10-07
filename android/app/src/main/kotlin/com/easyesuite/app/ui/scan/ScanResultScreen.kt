@@ -91,7 +91,7 @@ fun ScanResultScreen(graph: AppContainer.Graph, nav: NavHostController, code: St
     LaunchedEffect(s) {
         if (!s.loading) {
             val single = listOfNotNull(
-                s.items.singleOrNull()?.let { Routes.item(it.id) },
+                s.items.singleOrNull()?.let { Routes.item(it.id, it.itemType) },
                 s.shipment?.let { Routes.shipment(it.id) },
                 s.order?.let { Routes.order(it.id) },
             )
@@ -111,7 +111,7 @@ fun ScanResultScreen(graph: AppContainer.Graph, nav: NavHostController, code: St
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())) {
             if (s.items.isNotEmpty()) {
                 SectionTitle("Items", Modifier.padding(horizontal = 16.dp))
-                s.items.forEach { item -> ItemRow(item) { nav.navigate(Routes.item(item.id)) } }
+                s.items.forEach { item -> ItemRow(item) { nav.navigate(Routes.item(item.id, item.itemType)) } }
             }
             s.shipment?.let { sh ->
                 SectionTitle("Shipment", Modifier.padding(horizontal = 16.dp))

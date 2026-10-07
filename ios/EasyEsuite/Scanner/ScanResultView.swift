@@ -52,7 +52,7 @@ struct ScanResultView: View {
                 HStack { Spacer(); ProgressView(); Spacer() }
             } else {
                 if !s.items.isEmpty {
-                    Section("Items") { ForEach(s.items) { item in NavigationLink(value: Route.item(item.id)) { ItemRow(item: item) } } }
+                    Section("Items") { ForEach(s.items) { item in NavigationLink(value: Route.item(item.id, type: item.itemType)) { ItemRow(item: item) } } }
                 }
                 if let sh = s.shipment {
                     Section("Shipment") {
@@ -95,7 +95,7 @@ struct ScanResultView: View {
         guard !jumped else { return }
         let s = model.state
         var routes: [Route] = []
-        if s.items.count == 1, let i = s.items.first { routes.append(.item(i.id)) }
+        if s.items.count == 1, let i = s.items.first { routes.append(.item(i.id, type: i.itemType)) }
         if let sh = s.shipment { routes.append(.shipment(sh.id)) }
         if let o = s.order { routes.append(.order(o.id)) }
         if routes.count == 1, s.items.count <= 1 { jumped = true; autoRoute = routes[0] }
@@ -103,7 +103,7 @@ struct ScanResultView: View {
 
     @ViewBuilder private func autoDestination(_ r: Route) -> some View {
         switch r {
-        case .item(let id): ItemDetailView(graph: graph, id: id)
+        case .item(let id, let type): ItemDetailView(graph: graph, id: id, itemType: type)
         case .shipment(let id): ShipmentDetailView(graph: graph, id: id)
         case .order(let id): OrderDetailView(graph: graph, id: id)
         default: EmptyView()

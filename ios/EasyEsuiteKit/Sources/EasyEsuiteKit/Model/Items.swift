@@ -175,7 +175,7 @@ public struct Warehouse: Decodable, Identifiable, Hashable, Sendable {
     public var `default`: Bool { isDefault ?? false }
 }
 
-/// `items/get_item_upc/?upc=` — external product-database lookup used to prefill a new item.
+/// `items/get_item_upc/{upc}/` — product lookup used to prefill a new item.
 public struct UpcLookupResponse: Decodable, Sendable { public var data: UpcProduct? }
 
 public struct UpcProduct: Decodable, Hashable, Sendable {
@@ -190,8 +190,38 @@ public struct UpcProduct: Decodable, Hashable, Sendable {
     public var images: [String]?
 }
 
-/// Body for `POST items/inventory_items/`. Keys mirror the web "Add item" form (verified);
-/// the endpoint itself is still to be confirmed (docs/API_MAP.md).
+/// `items/item_conditions/` row (form dropdown + list filter).
+public struct ItemCondition: Decodable, Identifiable, Hashable, Sendable {
+    public var id: Int
+    public var name: String?
+    public var displayName: String { name?.nilIfBlank ?? "Condition #\(id)" }
+}
+
+/// `items/tax_schedules/` row (form dropdown).
+public struct TaxSchedule: Decodable, Identifiable, Hashable, Sendable {
+    public var id: Int
+    public var name: String?
+    public var isDefault: Bool?
+    public var displayName: String { name?.nilIfBlank ?? "Schedule #\(id)" }
+}
+
+/// One row of `marketplace_pricing` on create/update.
+public struct MarketplacePriceRequest: Encodable, Hashable, Sendable {
+    public var marketplace: Int
+    /// Decimal string, e.g. "9.99".
+    public var price: String
+    public var priceCurrency: String
+    public init(marketplace: Int, price: String, priceCurrency: String = "USD") { self.marketplace = marketplace; self.price = price; self.priceCurrency = priceCurrency }
+}
+
+/// Body for `POST items/inventory_items/` (VERIFIED against the web app source, Oct 2026).
+///
+/// Rules from the backend team:
+///  - the seven `*_marketplace` objects are required — send `{}` for the ones you don't configure
+///    (Amazon wants its two FBA flags present);
+///  - `marketplace_pricing` is required — `[]` or `{marketplace, price, price_currency}` rows;
+///  - empty optional fields must be omitted/null, never `""` (`purchase_price: ""` is a 400);
+///  - `name` is unique per item type (400 "An item with the same name and type already exists").
 public struct CreateItemRequest: Encodable, Sendable {
     public var name: String
     public var upcCode: String?
@@ -209,7 +239,10 @@ public struct CreateItemRequest: Encodable, Sendable {
     public var height: String?
     public var dimensionUnit: String?
     public var reorderPoint: Int?
+    /// Id from `items/item_conditions/`.
     public var itemCondition: Int?
+    /// Id from `items/tax_schedules/`.
+    public var taxSchedule: Int?
     public var salesDescription: String?
     public var purchaseDescription: String?
     public var costingMethod: String = "AVG"
@@ -218,8 +251,51 @@ public struct CreateItemRequest: Encodable, Sendable {
     public var taxable: Bool = true
     public var itemType: String = "INV"
     public var itemImages: [ItemImage] = []
+    public var marketplacePricing: [MarketplacePriceRequest] = []
+    // Required marketplace configuration blocks — empty unless the user configures a channel.
+    public var amazonMarketplace: JSONValue = CreateItemRequest.amazonDefault
+    public var ebayMarketplace: JSONValue = .object([:])
+    public var walmartMarketplace: JSONValue = .object([:])
+    public var targetMarketplace: JSONValue = .object([:])
+    public var bestBuyMarketplace: JSONValue = .object([:])
+    public var macysMarketplace: JSONValue = .object([:])
+    public var mercadoMarketplace: JSONValue = .object([:])
+
+    public static let amazonDefault: JSONValue = .object(["amazon_fba_account_1": .bool(false), "amazon_fba_account_2": .bool(false)])
 
     public init(name: String) { self.name = name }
+}
+
+/// One row of `items/{type}/{id}/history/` — shape not captured yet, so every field is optional.
+public struct ItemHistoryEntry: Decodable, Hashable, Sendable {
+    public var id: Int64?
+    public var date: String?
+    public var createdDate: String?
+    public var type: String?
+    public var transactionType: String?
+    public var action: String?
+    public var quantity: Double?
+    public var quantityChange: Double?
+    public var warehouse: String?
+    public var warehouseName: String?
+    public var reference: String?
+    public var number: String?
+    public var memo: String?
+    public var description: String?
+    public var addedBy: String?
+    public var user: String?
+
+    public var timestamp: String? { date ?? createdDate }
+    public var label: String {
+        let raw = transactionType ?? type ?? action ?? "Movement"
+        let spaced = raw.replacingOccurrences(of: "_", with: " ")
+        return spaced.prefix(1).uppercased() + spaced.dropFirst()
+    }
+    public var delta: Double? { quantityChange ?? quantity }
+    public var detail: String {
+        [warehouseName ?? warehouse, reference ?? number, memo ?? description, addedBy ?? user]
+            .compactMap { $0?.nilIfBlank }.joined(separator: " · ")
+    }
 }
 
 /// Body for `POST items/warehouse_inventory_items/` (initial stocking). ASSUMED.

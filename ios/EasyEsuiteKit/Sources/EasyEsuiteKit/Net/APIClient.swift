@@ -10,23 +10,39 @@ public final class APIClient: @unchecked Sendable {
     public var onSessionExpired: (@Sendable () -> Void)?
 
     private let session: URLSession
-    private let refresher = RefreshCoordinator()
+    private let coordinator = RefreshCoordinator()
+    /// Explicit refresh strategy (tests); nil = follow the session's provider.
+    private let refresherOverride: TokenRefresher?
+    private let firebaseRefresher: TokenRefresher?
 
-    public init(config: ApiConfig, tokenStore: TokenStore, urlSession: URLSession? = nil) {
+    /// - Parameter refresher: how an expired access token is renewed. When nil the strategy follows the session:
+    ///   tokens minted by Firebase (`Session.provider == firebase`) go through the securetoken exchange
+    ///   (needs `config.firebase`), everything else through the backend's `auth/token/refresh/`.
+    public init(config: ApiConfig, tokenStore: TokenStore, urlSession: URLSession? = nil, refresher: TokenRefresher? = nil) {
         self.config = config
         self.tokenStore = tokenStore
+        self.refresherOverride = refresher
         let d = JSONDecoder()
         d.keyDecodingStrategy = .convertFromSnakeCase
         self.decoder = d
         let e = JSONEncoder()
         e.keyEncodingStrategy = .convertToSnakeCase
         self.encoder = e
-        if let urlSession { self.session = urlSession } else {
+        let resolved: URLSession
+        if let urlSession { resolved = urlSession } else {
             let cfg = URLSessionConfiguration.default
             cfg.timeoutIntervalForRequest = 60
             cfg.waitsForConnectivity = true
-            self.session = URLSession(configuration: cfg)
+            resolved = URLSession(configuration: cfg)
         }
+        self.session = resolved
+        self.firebaseRefresher = config.firebase.map { FirebaseTokenRefresher(firebase: FirebaseAuth(config: $0, urlSession: resolved)) as TokenRefresher }
+    }
+
+    private func refresher(for session: Session) -> TokenRefresher {
+        if let refresherOverride { return refresherOverride }
+        if session.provider == Session.providerFirebase, let firebaseRefresher { return firebaseRefresher }
+        return BackendTokenRefresher(client: self)
     }
 
     // MARK: - Public API
@@ -71,10 +87,15 @@ public final class APIClient: @unchecked Sendable {
         return try decode(res)
     }
 
-    struct Raw { let status: Int; let data: Data }
+    public struct Raw: Sendable { public let status: Int; public let data: Data }
 
     private func raw(_ method: String, url: URL, body: Data?, contentType: String?, authenticated: Bool) async throws -> Raw {
-        var res = try await send(method, url: url, body: body, contentType: contentType, token: authenticated ? tokenStore.load()?.access : nil)
+        var token = authenticated ? tokenStore.load()?.access : nil
+        if authenticated, tokenStore.load()?.isAccessExpiring() == true, let fresh = await refreshAccessToken() {
+            // Firebase ID tokens live an hour; renew before the call instead of eating a 401 round-trip.
+            token = fresh
+        }
+        var res = try await send(method, url: url, body: body, contentType: contentType, token: token)
         if res.status == 401 && authenticated {
             if let fresh = await refreshAccessToken() {
                 res = try await send(method, url: url, body: body, contentType: contentType, token: fresh)
@@ -122,21 +143,17 @@ public final class APIClient: @unchecked Sendable {
 
     /// Serialised so concurrent 401s trigger a single refresh. Returns the new access token or nil.
     private func refreshAccessToken() async -> String? {
-        await refresher.run { [weak self] in
-            guard let self, let current = self.tokenStore.load(), let refresh = current.refresh else { return nil }
-            guard let body = try? self.encoder.encode(RefreshRequest(refresh: refresh)) else { return nil }
-            guard let res = try? await self.send("POST", url: self.url(Endpoints.tokenRefresh, query: [:]), body: body, contentType: "application/json", token: nil),
-                  (200..<300).contains(res.status),
-                  let parsed = try? self.decoder.decode(TokenResponse.self, from: res.data),
-                  let access = parsed.resolvedAccess else { return nil }
-            var updated = current
-            updated.access = access
-            updated.refresh = parsed.resolvedRefresh ?? current.refresh
-            updated.accessExpiration = parsed.accessExpiration ?? current.accessExpiration
-            updated.refreshExpiration = parsed.refreshExpiration ?? current.refreshExpiration
-            self.tokenStore.save(updated)
-            return access
+        await coordinator.run { [weak self] in
+            guard let self, let current = self.tokenStore.load(), current.refresh?.isEmpty == false else { return nil }
+            guard let renewed = await self.refresher(for: current).refresh(current) else { return nil }
+            self.tokenStore.save(renewed)
+            return renewed.access
         }
+    }
+
+    /// Raw call helper for refresh strategies (no auth header, no retry).
+    func rawPost(_ path: String, body: Data) async throws -> Raw {
+        try await send("POST", url: url(path, query: [:]), body: body, contentType: "application/json", token: nil)
     }
 
     public func url(_ path: String, query: [String: Any?]) -> URL {

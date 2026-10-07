@@ -96,6 +96,9 @@ public enum DateText {
         }
     }
 
+    /// `2026-10-07T18:00:00Z` — what the session stores for token expirations.
+    public static func iso8601(_ date: Date) -> String { isoPlain.string(from: date) }
+
     /// `yyyy-MM-dd` for dates in request bodies.
     public static func apiDate(_ date: Date = Date()) -> String {
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"; return f.string(from: date)

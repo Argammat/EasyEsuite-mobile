@@ -38,7 +38,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -193,8 +192,14 @@ fun NewItemScreen(graph: AppContainer.Graph, nav: NavHostController, initialUpc:
             Field(f.manufacturer, { v -> vm.edit { copy(manufacturer = v) } }, "Manufacturer")
             Field(f.description, { v -> vm.edit { copy(description = v) } }, "Description", singleLine = false, minLines = 3)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = f.conditionNew, onClick = { vm.edit { copy(conditionNew = true) } }, label = { Text("New") })
-                FilterChip(selected = !f.conditionNew, onClick = { vm.edit { copy(conditionNew = false) } }, label = { Text("Other / set later") })
+                WarehousePicker(
+                    options = ui.conditions.map { it.id to it.name.ifBlank { "Condition #${it.id}" } }, selected = f.conditionId,
+                    onSelect = { id -> vm.edit { copy(conditionId = id) } }, modifier = Modifier.weight(1f), label = "Condition",
+                )
+                WarehousePicker(
+                    options = ui.taxSchedules.map { it.id to it.name.ifBlank { "Schedule #${it.id}" } }, selected = f.taxScheduleId,
+                    onSelect = { id -> vm.edit { copy(taxScheduleId = id) } }, modifier = Modifier.weight(1f), label = "Tax schedule",
+                )
             }
 
             // ---- Commercial ---------------------------------------------------------------------

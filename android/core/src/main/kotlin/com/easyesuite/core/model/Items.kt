@@ -4,6 +4,8 @@ import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 @Serializable
 data class ItemImage(@SerialName("image_url") val imageUrl: String? = null)
@@ -202,9 +204,30 @@ data class UpcProduct(
     val images: List<String> = emptyList(),
 )
 
+@Serializable
+data class ItemCondition(val id: Int, val name: String = "")
+
+@Serializable
+data class TaxSchedule(val id: Int, val name: String = "", @SerialName("is_default") val isDefault: Boolean? = null)
+
+/** One row of `marketplace_pricing` on create/update. */
+@Serializable
+data class MarketplacePriceRequest(
+    val marketplace: Int,
+    /** Decimal string, e.g. "9.99". */
+    val price: String,
+    @SerialName("price_currency") val priceCurrency: String = "USD",
+)
+
 /**
- * Body for `POST items/inventory_items/`. Keys mirror the web "Add item" form field names
- * (verified in the browser); the endpoint itself still needs confirming (see docs/API_MAP.md).
+ * Body for `POST items/inventory_items/` (VERIFIED against the web app source, Oct 2026).
+ *
+ * Rules from the backend team:
+ *  - the seven `*_marketplace` objects are required — send `{}` for the ones you don't configure
+ *    (Amazon wants its two FBA flags present);
+ *  - `marketplace_pricing` is required — `[]` or `{marketplace, price, price_currency}` rows;
+ *  - empty optional fields must be omitted/null, never `""` (`purchase_price: ""` is a 400);
+ *  - `name` is unique per item type (400 "An item with the same name and type already exists").
  */
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
@@ -226,7 +249,10 @@ data class CreateItemRequest(
     val height: String? = null,
     @SerialName("dimension_unit") val dimensionUnit: String? = null,
     @SerialName("reorder_point") val reorderPoint: Int? = null,
+    /** Id from `items/item_conditions/`. */
     @SerialName("item_condition") val conditionId: Int? = null,
+    /** Id from `items/tax_schedules/`. */
+    @SerialName("tax_schedule") val taxSchedule: Int? = null,
     @SerialName("sales_description") val salesDescription: String? = null,
     @SerialName("purchase_description") val purchaseDescription: String? = null,
     @EncodeDefault @SerialName("costing_method") val costingMethod: String = "AVG",
@@ -234,8 +260,52 @@ data class CreateItemRequest(
     @EncodeDefault @SerialName("calculate_quantity_discounts_type") val quantityDiscountType: String = "BLQ",
     @EncodeDefault val taxable: Boolean = true,
     @EncodeDefault @SerialName("item_type") val itemType: String = "INV",
-    @SerialName("item_images") val images: List<ItemImage> = emptyList(),
-)
+    @EncodeDefault @SerialName("item_images") val images: List<ItemImage> = emptyList(),
+    @EncodeDefault @SerialName("marketplace_pricing") val marketplacePricing: List<MarketplacePriceRequest> = emptyList(),
+    // Required marketplace configuration blocks — empty unless the user configures a channel.
+    @EncodeDefault @SerialName("amazon_marketplace") val amazonMarketplace: JsonObject = AMAZON_DEFAULT,
+    @EncodeDefault @SerialName("ebay_marketplace") val ebayMarketplace: JsonObject = EMPTY,
+    @EncodeDefault @SerialName("walmart_marketplace") val walmartMarketplace: JsonObject = EMPTY,
+    @EncodeDefault @SerialName("target_marketplace") val targetMarketplace: JsonObject = EMPTY,
+    @EncodeDefault @SerialName("best_buy_marketplace") val bestBuyMarketplace: JsonObject = EMPTY,
+    @EncodeDefault @SerialName("macys_marketplace") val macysMarketplace: JsonObject = EMPTY,
+    @EncodeDefault @SerialName("mercado_marketplace") val mercadoMarketplace: JsonObject = EMPTY,
+) {
+    companion object {
+        val EMPTY = JsonObject(emptyMap())
+        val AMAZON_DEFAULT = JsonObject(
+            mapOf("amazon_fba_account_1" to JsonPrimitive(false), "amazon_fba_account_2" to JsonPrimitive(false)),
+        )
+    }
+}
+
+/** One row of `items/{type}/{id}/history/` — shape not captured yet, so every field is optional. */
+@Serializable
+data class ItemHistoryEntry(
+    val id: Long? = null,
+    val date: String? = null,
+    @SerialName("created_date") val createdDate: String? = null,
+    val type: String? = null,
+    @SerialName("transaction_type") val transactionType: String? = null,
+    val action: String? = null,
+    val quantity: Double? = null,
+    @SerialName("quantity_change") val quantityChange: Double? = null,
+    val warehouse: String? = null,
+    @SerialName("warehouse_name") val warehouseName: String? = null,
+    val reference: String? = null,
+    val number: String? = null,
+    val memo: String? = null,
+    val description: String? = null,
+    @SerialName("added_by") val addedBy: String? = null,
+    val user: String? = null,
+) {
+    val timestamp: String? get() = date ?: createdDate
+    val label: String get() = (transactionType ?: type ?: action ?: "Movement").replace('_', ' ').replaceFirstChar { it.uppercase() }
+    val delta: Double? get() = quantityChange ?: quantity
+    val detail: String
+        get() = listOfNotNull(warehouseName ?: warehouse, reference ?: number, memo ?: description, addedBy ?: user)
+            .filter { it.isNotBlank() }.joinToString(" · ")
+}
 
 /** Body for `POST items/warehouse_inventory_items/` (initial stocking). ASSUMED. */
 @Serializable

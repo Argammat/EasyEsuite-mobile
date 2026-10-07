@@ -4,8 +4,10 @@ import android.content.Context
 import com.easyesuite.app.BuildConfig
 import com.easyesuite.app.data.SecureTokenStore
 import com.easyesuite.core.ApiConfig
+import com.easyesuite.core.FirebaseConfig
 import com.easyesuite.core.auth.AuthService
 import com.easyesuite.core.auth.Session
+import com.easyesuite.core.auth.TenantDirectory
 import com.easyesuite.core.net.ApiClient
 import com.easyesuite.core.repo.AssistantRepository
 import com.easyesuite.core.repo.InventoryRepository
@@ -32,15 +34,28 @@ class AppContainer(context: Context) {
         }
     }.build()
 
+    /** Company name → workspace + Identity Platform tenant id (used only when Firebase sign-in is configured). */
+    val tenantDirectory = TenantDirectory(apiRoot = BuildConfig.API_ROOT, http = okHttp)
+
+    /** True when this build signs in against Firebase / Identity Platform (see app/build.gradle.kts). */
+    val firebaseSignIn: Boolean get() = BuildConfig.FIREBASE_API_KEY.isNotBlank()
+
     private val _session = MutableStateFlow(tokenStore.load())
     /** Null = signed out. Observed by the root composable to switch between login and the app. */
     val session: StateFlow<Session?> = _session
 
-    @Volatile private var graph: Graph? = _session.value?.let { Graph(it.tenant) }
+    @Volatile private var graph: Graph? = _session.value?.let { Graph(it.tenant, it.firebaseTenantId) }
 
-    inner class Graph(val tenant: String) {
+    inner class Graph(val tenant: String, firebaseTenantId: String? = null) {
+        val config = ApiConfig(
+            tenant = tenant,
+            apiRoot = BuildConfig.API_ROOT,
+            firebase = BuildConfig.FIREBASE_API_KEY.takeIf { it.isNotBlank() }?.let { key ->
+                FirebaseConfig(apiKey = key, tenantId = firebaseTenantId ?: BuildConfig.FIREBASE_TENANT_ID.takeIf { it.isNotBlank() })
+            },
+        )
         val client = ApiClient(
-            config = ApiConfig(tenant = tenant, apiRoot = BuildConfig.API_ROOT),
+            config = config,
             tokenStore = tokenStore,
             baseClient = okHttp,
             onSessionExpired = { signOut() },
@@ -58,7 +73,7 @@ class AppContainer(context: Context) {
     fun graph(): Graph = graph ?: error("No active session")
 
     /** A graph for a tenant the user is trying to sign in to (no session yet). */
-    fun graphFor(tenant: String): Graph = Graph(tenant)
+    fun graphFor(tenant: String, firebaseTenantId: String? = null): Graph = Graph(tenant, firebaseTenantId)
 
     fun onSignedIn(session: Session, graphUsed: Graph) {
         tokenStore.lastTenant = session.tenant

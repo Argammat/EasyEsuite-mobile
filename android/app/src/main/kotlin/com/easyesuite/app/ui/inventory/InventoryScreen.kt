@@ -16,6 +16,7 @@ import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -42,6 +43,7 @@ import com.easyesuite.app.ui.common.PagedListViewModel
 import com.easyesuite.app.ui.common.SearchField
 import com.easyesuite.app.ui.theme.Amber
 import com.easyesuite.app.ui.theme.Green
+import com.easyesuite.core.model.DashboardCard
 import com.easyesuite.core.model.InventoryItem
 import com.easyesuite.core.model.Page
 import com.easyesuite.core.model.PageQuery
@@ -61,6 +63,12 @@ sealed interface StockRowModel {
     data class PerWarehouse(val stock: WarehouseStock) : StockRowModel { override val key get() = "w-${stock.id}" }
 }
 
+/**
+ * Company view = `items/inventory_items/` (+ `get_inventory_totalization/`);
+ * warehouse view = `items/warehouse_inventory_items/?warehouse_id=` (+ `totalization/`).
+ * `search` and `is_available` are server-side; "below reorder point" is the only client-side filter
+ * (the API has no parameter for it).
+ */
 @OptIn(FlowPreview::class)
 class InventoryViewModel(private val graph: AppContainer.Graph) : PagedListViewModel<StockRowModel>() {
     val query = MutableStateFlow("")
@@ -68,6 +76,8 @@ class InventoryViewModel(private val graph: AppContainer.Graph) : PagedListViewM
     val lowStockOnly = MutableStateFlow(false)
     val warehouses = MutableStateFlow<List<Warehouse>>(emptyList())
     val warehouseId = MutableStateFlow<Int?>(null)
+    /** Totals strip above the list; null while loading, empty when the endpoint returned nothing usable. */
+    val totals = MutableStateFlow<List<DashboardCard>?>(null)
 
     init {
         refresh()
@@ -79,6 +89,23 @@ class InventoryViewModel(private val graph: AppContainer.Graph) : PagedListViewM
     fun setLowStockOnly(v: Boolean) { lowStockOnly.value = v; refresh() }
     fun setWarehouse(id: Int?) { warehouseId.value = id; refresh() }
 
+    override fun refresh() {
+        super.refresh()
+        loadTotals()
+    }
+
+    private fun loadTotals() {
+        totals.value = null
+        viewModelScope.launch {
+            val wh = warehouseId.value
+            val result = runCatching {
+                if (wh == null) graph.items.inventoryTotals(search = query.value, availableOnly = availableOnly.value)
+                else graph.items.warehouseTotals(wh, availableOnly = availableOnly.value)
+            }
+            totals.value = result.getOrDefault(emptyList()).filter { it.numeric != null }.take(6)
+        }
+    }
+
     override suspend fun fetch(page: PageQuery): Page<StockRowModel> {
         val wh = warehouseId.value
         return if (wh == null) {
@@ -86,9 +113,8 @@ class InventoryViewModel(private val graph: AppContainer.Graph) : PagedListViewM
             val rows = p.results.filter { !lowStockOnly.value || it.belowReorderPoint }.map { StockRowModel.Company(it) }
             Page(count = p.count, next = p.next, previous = p.previous, results = rows)
         } else {
-            val p = graph.items.stockInWarehouse(wh, search = query.value, page = page)
+            val p = graph.items.stockInWarehouse(wh, search = query.value, availableOnly = availableOnly.value, page = page)
             val rows = p.results
-                .filter { !availableOnly.value || it.onHand > 0 }
                 .filter { !lowStockOnly.value || ((it.reorderPoint ?: 0) > 0 && it.available < (it.reorderPoint ?: 0)) }
                 .map { StockRowModel.PerWarehouse(it) }
             Page(count = p.count, next = p.next, previous = p.previous, results = rows)
@@ -106,6 +132,7 @@ fun InventoryScreen(graph: AppContainer.Graph, nav: NavHostController) {
     val lowOnly by vm.lowStockOnly.collectAsState()
     val warehouses by vm.warehouses.collectAsState()
     val warehouseId by vm.warehouseId.collectAsState()
+    val totals by vm.totals.collectAsState()
 
     Scaffold(
         topBar = {
@@ -134,6 +161,7 @@ fun InventoryScreen(graph: AppContainer.Graph, nav: NavHostController) {
                 FilterChip(selected = availableOnly, onClick = { vm.setAvailableOnly(!availableOnly) }, label = { Text("In stock") })
                 FilterChip(selected = lowOnly, onClick = { vm.setLowStockOnly(!lowOnly) }, label = { Text("Below reorder point") })
             }
+            TotalsStrip(totals)
             Spacer(Modifier.height(4.dp))
             PagedList(
                 state = state, onRefresh = vm::refresh, onLoadMore = vm::loadMore,
@@ -141,9 +169,29 @@ fun InventoryScreen(graph: AppContainer.Graph, nav: NavHostController) {
             ) { rows ->
                 items(rows.size, key = { rows[it].key }) { i ->
                     when (val r = rows[i]) {
-                        is StockRowModel.Company -> CompanyStockRow(r.item) { nav.navigate(Routes.item(r.item.id)) }
+                        is StockRowModel.Company -> CompanyStockRow(r.item) { nav.navigate(Routes.item(r.item.id, r.item.itemType)) }
                         is StockRowModel.PerWarehouse -> WarehouseStockRow(r.stock) { r.stock.inventoryItemId?.let { id -> nav.navigate(Routes.item(id)) } }
                     }
+                }
+            }
+        }
+    }
+}
+
+/** Company-wide or per-warehouse totals (`get_inventory_totalization/` / `totalization/`), rendered as small cards. */
+@Composable
+private fun TotalsStrip(cards: List<DashboardCard>?) {
+    if (cards == null || cards.isEmpty()) return
+    androidx.compose.foundation.lazy.LazyRow(
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(cards.size, key = { cards[it].key }) { i ->
+            val c = cards[i]
+            Card {
+                Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    Text(c.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, maxLines = 1)
+                    Text(c.value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1)
                 }
             }
         }

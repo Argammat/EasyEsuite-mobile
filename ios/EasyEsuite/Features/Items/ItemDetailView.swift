@@ -1,34 +1,55 @@
 import SwiftUI
 import EasyEsuiteKit
 
-struct ItemDetailData { var item: ItemDetail; var stock: [WarehouseStock]; var stockError: String? }
+struct ItemDetailData {
+    var item: ItemDetail
+    var stock: [WarehouseStock]
+    var stockError: String?
+    /// nil while loading; empty when the item has no movements.
+    var history: [ItemHistoryEntry]?
+    var historyError: String?
+}
 
+/// Detail comes from the type-specific endpoint (`inventory_items` / `kit_package_items` / `variant_items`),
+/// stock per warehouse from `warehouse_inventory_items/?item=`, movements from `.../{id}/history/`.
 @MainActor
 final class ItemDetailModel: ObservableObject {
     @Published var state: Loadable<ItemDetailData> = .idle
     let graph: AppContainer.Graph
     let id: Int64
-    init(graph: AppContainer.Graph, id: Int64) { self.graph = graph; self.id = id }
+    let itemType: String?
+    init(graph: AppContainer.Graph, id: Int64, itemType: String?) { self.graph = graph; self.id = id; self.itemType = itemType }
 
     func load() async {
         state = .loading
         do {
-            async let item = graph.items.item(id)
+            async let item = graph.items.item(id, type: itemType ?? ItemTypes.inventory)
             var stock: [WarehouseStock] = []
             var stockError: String?
             do { stock = try await graph.items.stockByWarehouse(itemId: id) } catch { stockError = error.userMessage }
             let detail = try await item
             state = .ready(ItemDetailData(item: detail, stock: stock, stockError: stockError))
+            await loadHistory(type: detail.itemType ?? itemType)
         } catch {
             state = .failed(error.userMessage)
         }
+    }
+
+    private func loadHistory(type: String?) async {
+        var history: [ItemHistoryEntry] = []
+        var historyError: String?
+        do { history = try await graph.items.history(id, type: type) } catch { historyError = error.userMessage }
+        guard var data = state.value else { return }
+        data.history = history
+        data.historyError = historyError
+        state = .ready(data)
     }
 }
 
 struct ItemDetailView: View {
     @StateObject private var model: ItemDetailModel
 
-    init(graph: AppContainer.Graph, id: Int64) { _model = StateObject(wrappedValue: ItemDetailModel(graph: graph, id: id)) }
+    init(graph: AppContainer.Graph, id: Int64, itemType: String? = nil) { _model = StateObject(wrappedValue: ItemDetailModel(graph: graph, id: id, itemType: itemType)) }
 
     var body: some View {
         Group {
@@ -54,7 +75,7 @@ struct ItemDetailView: View {
                     }
                 }
                 Text(item.displayTitle).font(.headline)
-                Text([item.upcCode.map { "UPC \($0)" }, item.marketplaceBrand, item.itemConditionName].compactMap { $0 }.joined(separator: " · "))
+                Text([ItemTypes.badge(item.itemType), item.upcCode.map { "UPC \($0)" }, item.marketplaceBrand, item.itemConditionName].compactMap { $0 }.joined(separator: " · "))
                     .font(.caption).foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
@@ -98,10 +119,40 @@ struct ItemDetailView: View {
                     SectionHeader(text: "Description")
                     Text(d).font(.subheadline)
                 }
+
+                SectionHeader(text: "History")
+                if let e = data.historyError {
+                    Text(e).foregroundStyle(.red).font(.caption)
+                } else if let history = data.history {
+                    if history.isEmpty { Text("No stock movements recorded.").font(.caption).foregroundStyle(.secondary) }
+                    ForEach(Array(history.prefix(50).enumerated()), id: \.offset) { _, entry in HistoryRow(entry: entry) }
+                } else {
+                    Text("Loading movements…").font(.caption).foregroundStyle(.secondary)
+                }
             }
             .padding()
         }
         .refreshable { await model.load() }
+    }
+}
+
+struct HistoryRow: View {
+    let entry: ItemHistoryEntry
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.label).font(.subheadline.weight(.medium))
+                let meta = [entry.timestamp.map { DateText.short($0) }, entry.detail.nilIfBlank].compactMap { $0 }.joined(separator: " · ")
+                if !meta.isEmpty { Text(meta).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+            }
+            Spacer()
+            if let delta = entry.delta {
+                let whole = delta == delta.rounded()
+                let text = (delta > 0 ? "+" : "") + (whole ? String(Int64(delta)) : String(format: "%.2f", delta))
+                Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(delta < 0 ? Brand.amber : (delta > 0 ? Brand.green : Color.secondary))
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 

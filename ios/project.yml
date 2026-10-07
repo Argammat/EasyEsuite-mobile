@@ -39,9 +39,19 @@ targets:
         NSCameraUsageDescription: EasyEsuite uses the camera to scan product barcodes and shipping labels, and to photograph new items.
         NSPhotoLibraryUsageDescription: EasyEsuite lets you attach photos from your library to items.
         ITSAppUsesNonExemptEncryption: false
+        # Backend + sign-in configuration (read by AppConfig). Values come from build settings so real
+        # keys stay out of git: pass them on the xcodebuild command line or in an untracked xcconfig.
+        EasyEsuiteAPIRoot: $(EASYESUITE_API_ROOT)
+        EasyEsuiteFirebaseAPIKey: $(EASYESUITE_FIREBASE_API_KEY)
+        EasyEsuiteFirebaseTenantId: $(EASYESUITE_FIREBASE_TENANT_ID)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.easyesuite.mobile
+        # Empty = production API host / backend-proxied auth/login/ flow. Set EASYESUITE_FIREBASE_API_KEY to the
+        # Firebase web API key to sign in against Identity Platform instead (docs/API_MAP.md → Auth).
+        EASYESUITE_API_ROOT: ""
+        EASYESUITE_FIREBASE_API_KEY: ""
+        EASYESUITE_FIREBASE_TENANT_ID: ""
         TARGETED_DEVICE_FAMILY: "1,2"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor

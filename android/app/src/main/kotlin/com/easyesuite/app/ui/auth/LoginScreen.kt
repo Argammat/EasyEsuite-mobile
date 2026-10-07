@@ -70,7 +70,11 @@ class LoginViewModel(private val container: AppContainer) : ViewModel() {
         if (!s.canSubmit) return
         ui.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
-            val graph = container.graphFor(s.tenant.trim().lowercase())
+            val tenant = s.tenant.trim().lowercase()
+            // Firebase sign-in needs the workspace's Identity Platform tenant id; the global directory maps
+            // the company name to it (falls back to the build-time default, then to project-level users).
+            val identityTenant = if (container.firebaseSignIn) container.tenantDirectory.lookup(tenant)?.firebaseTenantId else null
+            val graph = container.graphFor(tenant, identityTenant)
             try {
                 when (val r = graph.auth.login(s.email, s.password)) {
                     is LoginResult.Success -> container.onSignedIn(r.session, graph)

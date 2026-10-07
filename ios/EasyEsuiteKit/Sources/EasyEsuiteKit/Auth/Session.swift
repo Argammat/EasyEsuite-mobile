@@ -2,16 +2,45 @@ import Foundation
 
 /// What we persist between launches (Keychain on iOS).
 public struct Session: Codable, Equatable, Sendable {
+    public static let providerFirebase = "firebase"
+    public static let providerBackend = "backend"
+
     public var tenant: String
     public var access: String
     public var refresh: String?
     public var accessExpiration: String?
     public var refreshExpiration: String?
     public var email: String?
+    /// Who minted the tokens: `providerFirebase` (Identity Platform) or `providerBackend` (`auth/login/`).
+    public var provider: String
+    /// Identity Platform tenant the user signed in against (Firebase flow only); kept so the next launch reuses it.
+    public var firebaseTenantId: String?
 
-    public init(tenant: String, access: String, refresh: String? = nil, accessExpiration: String? = nil, refreshExpiration: String? = nil, email: String? = nil) {
+    public init(tenant: String, access: String, refresh: String? = nil, accessExpiration: String? = nil, refreshExpiration: String? = nil,
+                email: String? = nil, provider: String = Session.providerBackend, firebaseTenantId: String? = nil) {
         self.tenant = tenant; self.access = access; self.refresh = refresh
         self.accessExpiration = accessExpiration; self.refreshExpiration = refreshExpiration; self.email = email
+        self.provider = provider; self.firebaseTenantId = firebaseTenantId
+    }
+
+    // Sessions saved by older builds have no `provider`; default it instead of failing to decode (which would sign the user out).
+    private enum CodingKeys: String, CodingKey { case tenant, access, refresh, accessExpiration, refreshExpiration, email, provider, firebaseTenantId }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tenant = try c.decode(String.self, forKey: .tenant)
+        access = try c.decode(String.self, forKey: .access)
+        refresh = try c.decodeIfPresent(String.self, forKey: .refresh)
+        accessExpiration = try c.decodeIfPresent(String.self, forKey: .accessExpiration)
+        refreshExpiration = try c.decodeIfPresent(String.self, forKey: .refreshExpiration)
+        email = try c.decodeIfPresent(String.self, forKey: .email)
+        provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? Session.providerBackend
+        firebaseTenantId = try c.decodeIfPresent(String.self, forKey: .firebaseTenantId)
+    }
+
+    /// True when the access token expires within `skew` seconds (or already has). Unknown expiry → false.
+    public func isAccessExpiring(skew: TimeInterval = 60, now: Date = Date()) -> Bool {
+        guard let exp = DateText.parse(accessExpiration) else { return false }
+        return exp <= now.addingTimeInterval(skew)
     }
 }
 

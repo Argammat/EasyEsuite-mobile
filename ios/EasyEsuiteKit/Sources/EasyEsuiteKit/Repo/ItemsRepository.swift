@@ -1,17 +1,53 @@
 import Foundation
 
-/// Catalog, inventory levels, item creation.
+/// Catalog, inventory levels, item creation. Endpoints and query parameters follow the backend
+/// team's "Items & Inventory" notes (docs/API_MAP.md) — all VERIFIED unless a method says otherwise.
 public final class ItemsRepository: @unchecked Sendable {
     private let client: APIClient
     public init(client: APIClient) { self.client = client }
 
     // MARK: catalog
 
-    public func catalog(search: String? = nil, page: PageQuery = PageQuery()) async throws -> Page<ItemSummary> {
-        try await client.get(Endpoints.items, query: page.query.merging(["search": search?.nilIfBlank, "ordering": "-created_date"]) { $1 })
+    /// `items/items/` — every item type in one list. Filters: search, item_type, item_condition, is_available.
+    public func catalog(search: String? = nil, itemType: String? = nil, conditionId: Int? = nil, availableOnly: Bool = false, page: PageQuery = PageQuery()) async throws -> Page<ItemSummary> {
+        try await client.get(Endpoints.items, query: page.query.merging([
+            "search": search?.nilIfBlank,
+            "item_type": itemType,
+            "item_condition": conditionId,
+            "is_available": availableOnly ? true : nil,
+            "ordering": "-created_date",
+        ]) { $1 })
     }
 
-    public func item(_ id: Int64) async throws -> ItemDetail { try await client.get("\(Endpoints.items)\(id)/") }
+    /// Item detail from the type-specific endpoint (`inventory_items` / `kit_package_items` / `variant_items`).
+    /// Falls back to `items/items/{id}/` when the type is unknown or the typed endpoint 404s.
+    public func item(_ id: Int64, type: String? = ItemTypes.inventory) async throws -> ItemDetail {
+        do {
+            return try await client.get(Endpoints.itemDetail(id, type: type))
+        } catch APIError.http(let status, _, _) where status == 404 {
+            return try await client.get("\(Endpoints.items)\(id)/")
+        }
+    }
+
+    /// `items/{type}/{id}/history/` — stock movements for the item (shape decoded leniently, bad rows skipped).
+    public func history(_ id: Int64, type: String?, page: PageQuery = PageQuery(limit: 50)) async throws -> [ItemHistoryEntry] {
+        let raw: JSONValue = try await client.get(Endpoints.itemHistory(id, type: type), query: page.query)
+        let rows = raw.arrayValue ?? raw["results"]?.arrayValue ?? []
+        return rows.compactMap { row in
+            guard let data = try? JSONEncoder().encode(row) else { return nil }
+            return try? client.decoder.decode(ItemHistoryEntry.self, from: data)
+        }
+    }
+
+    public func conditions() async throws -> [ItemCondition] {
+        let page: Page<ItemCondition> = try await client.get(Endpoints.itemConditions, query: ["limit": 100])
+        return page.results
+    }
+
+    public func taxSchedules() async throws -> [TaxSchedule] {
+        let page: Page<TaxSchedule> = try await client.get(Endpoints.taxSchedules, query: ["limit": 100])
+        return page.results
+    }
 
     /// Resolve a scanned barcode to catalog items: exact UPC first (with EAN-13 ⇄ UPC-A variants), then free text.
     public func findByBarcode(_ code: String) async throws -> [ItemSummary] {
@@ -33,23 +69,38 @@ public final class ItemsRepository: @unchecked Sendable {
 
     // MARK: inventory
 
-    public func inventory(search: String? = nil, availableOnly: Bool = false, page: PageQuery = PageQuery()) async throws -> Page<InventoryItem> {
-        try await client.get(Endpoints.inventoryItems, query: page.query.merging(["search": search?.nilIfBlank, "is_available": availableOnly ? true : nil]) { $1 })
+    /// `items/inventory_items/` — the web "Inventory" page (per item, all warehouses summed).
+    public func inventory(search: String? = nil, availableOnly: Bool = false, itemId: Int64? = nil, page: PageQuery = PageQuery()) async throws -> Page<InventoryItem> {
+        try await client.get(Endpoints.inventoryItems, query: page.query.merging(["search": search?.nilIfBlank, "is_available": availableOnly ? true : nil, "item": itemId]) { $1 })
     }
 
     public func inventoryItem(_ id: Int64) async throws -> InventoryItem { try await client.get("\(Endpoints.inventoryItems)\(id)/") }
 
+    /// `items/inventory_items/get_inventory_totalization/` — company-wide totals, rendered as cards.
+    public func inventoryTotals(search: String? = nil, availableOnly: Bool = false) async throws -> [DashboardCard] {
+        let raw: JSONValue = try await client.get(Endpoints.inventoryTotals, query: ["search": search?.nilIfBlank, "is_available": availableOnly ? true : nil])
+        return DashboardCard.cards(from: raw)
+    }
+
+    /// Stock of one item in every warehouse (`items/warehouse_inventory_items/?item=`).
     public func stockByWarehouse(itemId: Int64) async throws -> [WarehouseStock] {
         let page: Page<WarehouseStock> = try await client.get(Endpoints.warehouseStock, query: ["item": itemId, "limit": 100])
         return page.results.sorted { $0.onHand > $1.onHand }
     }
 
-    public func stockInWarehouse(_ warehouseId: Int, search: String? = nil, page: PageQuery = PageQuery()) async throws -> Page<WarehouseStock> {
-        try await client.get(Endpoints.warehouseStock, query: page.query.merging(["warehouse": warehouseId, "search": search?.nilIfBlank]) { $1 })
+    /// Everything in one warehouse (`?warehouse_id=`), optionally only rows with stock.
+    public func stockInWarehouse(_ warehouseId: Int, search: String? = nil, availableOnly: Bool = false, page: PageQuery = PageQuery()) async throws -> Page<WarehouseStock> {
+        try await client.get(Endpoints.warehouseStock, query: page.query.merging(["warehouse_id": warehouseId, "search": search?.nilIfBlank, "is_available": availableOnly ? true : nil]) { $1 })
+    }
+
+    /// `items/warehouse_inventory_items/totalization/` for one warehouse (or all when nil).
+    public func warehouseTotals(warehouseId: Int?, availableOnly: Bool = false) async throws -> [DashboardCard] {
+        let raw: JSONValue = try await client.get(Endpoints.warehouseStockTotals, query: ["warehouse_id": warehouseId, "is_available": availableOnly ? true : nil])
+        return DashboardCard.cards(from: raw)
     }
 
     public func warehouses(activeOnly: Bool = true) async throws -> [Warehouse] {
-        let page: Page<Warehouse> = try await client.get(Endpoints.warehouses, query: ["limit": 200])
+        let page: Page<Warehouse> = try await client.get(Endpoints.warehouses, query: ["limit": 1000])
         return page.results.filter { !activeOnly || $0.active }.sorted { a, b in
             if a.default != b.default { return a.default }
             return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
@@ -58,9 +109,9 @@ public final class ItemsRepository: @unchecked Sendable {
 
     // MARK: create
 
-    /// External product-database lookup to prefill the "new item" form from a barcode.
+    /// Product lookup (`items/get_item_upc/{upc}/`) to prefill the "new item" form from a barcode.
     public func lookupUpc(_ upc: String) async throws -> UpcProduct? {
-        let res: UpcLookupResponse = try await client.get(Endpoints.upcLookup, query: ["upc": upc.trimmingCharacters(in: .whitespaces)])
+        let res: UpcLookupResponse = try await client.get(Endpoints.upcLookup(upc))
         guard let p = res.data, (p.title?.isEmpty == false) || !(p.images ?? []).isEmpty else { return nil }
         return p
     }
@@ -79,6 +130,7 @@ public final class ItemsRepository: @unchecked Sendable {
         try await client.post(Endpoints.warehouseStock, body: OpeningStockRequest(inventoryItem: itemId, warehouse: warehouseId, quantityOnHand: quantity))
     }
 
+    /// `POST files/images/` (multipart field `image`); the response's `image` field is the URL.
     public func uploadImage(_ data: Data, fileName: String = "photo.jpg", mimeType: String = "image/jpeg") async throws -> String? {
         let res: ImageUploadResponse = try await client.upload(Endpoints.imageUpload, field: "image", fileName: fileName, mimeType: mimeType, data: data)
         return res.resolvedUrl

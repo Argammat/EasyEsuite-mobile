@@ -1,10 +1,11 @@
 package com.easyesuite.core.net
 
 import com.easyesuite.core.ApiConfig
-import com.easyesuite.core.Endpoints
-import com.easyesuite.core.auth.RefreshRequest
+import com.easyesuite.core.auth.BackendTokenRefresher
+import com.easyesuite.core.auth.FirebaseAuth
+import com.easyesuite.core.auth.FirebaseTokenRefresher
 import com.easyesuite.core.auth.Session
-import com.easyesuite.core.auth.TokenResponse
+import com.easyesuite.core.auth.TokenRefresher
 import com.easyesuite.core.auth.TokenStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -45,7 +46,19 @@ class ApiClient(
     baseClient: OkHttpClient = OkHttpClient(),
     /** Called once when a refresh fails and the user must sign in again. */
     var onSessionExpired: (() -> Unit)? = null,
+    /**
+     * How an expired access token is renewed. When null the strategy follows the session: tokens minted by
+     * Firebase (`Session.provider == firebase`) go through the securetoken exchange (needs `config.firebase`),
+     * everything else through the backend's `auth/token/refresh/`.
+     */
+    private val refresherOverride: TokenRefresher? = null,
 ) {
+    private val firebaseRefresher: TokenRefresher? = config.firebase?.let { FirebaseTokenRefresher(FirebaseAuth(it, baseClient)) }
+    private val backendRefresher: TokenRefresher = BackendTokenRefresher(this)
+
+    private fun refresherFor(session: Session): TokenRefresher = refresherOverride
+        ?: if (session.provider == Session.PROVIDER_FIREBASE) (firebaseRefresher ?: backendRefresher) else backendRefresher
+
     private val http: OkHttpClient = baseClient.newBuilder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -120,7 +133,12 @@ class ApiClient(
     private data class RawResponse(val status: Int, val body: String?)
 
     private suspend fun send(method: String, url: HttpUrl, body: RequestBody?, authenticated: Boolean): RawResponse {
-        var response = call(method, url, body, if (authenticated) tokenStore.load()?.access else null)
+        var token = if (authenticated) tokenStore.load()?.access else null
+        if (authenticated && tokenStore.load()?.isAccessExpiring() == true) {
+            // Firebase ID tokens live an hour; renew before the call instead of eating a 401 round-trip.
+            refreshAccessToken()?.let { token = it }
+        }
+        var response = call(method, url, body, token)
         if (response.status == 401 && authenticated) {
             val refreshed = refreshAccessToken()
             if (refreshed != null) {
@@ -171,23 +189,19 @@ class ApiClient(
     /** Serialised so that concurrent 401s trigger a single refresh. Returns the new access token or null. */
     private suspend fun refreshAccessToken(): String? = refreshMutex.withLock {
         val current = tokenStore.load() ?: return null
-        val refresh = current.refresh ?: return null
-        val url = buildUrl(Endpoints.TOKEN_REFRESH, emptyMap())
-        val body = json.encodeToString(RefreshRequest.serializer(), RefreshRequest(refresh)).toRequestBody(JSON_MEDIA)
-        val res = runCatching { call("POST", url, body, accessToken = null) }.getOrNull() ?: return null
-        if (res.status !in 200..299 || res.body.isNullOrBlank()) return null
-        val parsed = runCatching { json.decodeFromString(TokenResponse.serializer(), res.body) }.getOrNull() ?: return null
-        val access = parsed.resolvedAccess ?: return null
-        tokenStore.save(
-            current.copy(
-                access = access,
-                refresh = parsed.resolvedRefresh ?: current.refresh,
-                accessExpiration = parsed.accessExpiration ?: current.accessExpiration,
-                refreshExpiration = parsed.refreshExpiration ?: current.refreshExpiration,
-            ),
-        )
-        access
+        if (current.refresh.isNullOrBlank()) return null
+        val renewed = runCatching { refresherFor(current).refresh(current) }.getOrNull() ?: return null
+        tokenStore.save(renewed)
+        renewed.access
     }
+
+    /** Raw call helper for refresh strategies (no auth header, no retry). */
+    internal fun rawPost(path: String, bodyJson: String): RawResult {
+        val res = call("POST", buildUrl(path, emptyMap()), bodyJson.toRequestBody(JSON_MEDIA), accessToken = null)
+        return RawResult(res.status, res.body)
+    }
+
+    data class RawResult(val status: Int, val body: String?)
 
     fun buildUrl(path: String, query: Map<String, Any?>): HttpUrl {
         val base = if (path.startsWith("http")) path else config.tenantRoot + path.trimStart('/')

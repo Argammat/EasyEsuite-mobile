@@ -115,11 +115,73 @@ final class APIClientTests: XCTestCase {
         }
     }
 
+    func testCreateItemBodyCarriesRequiredMarketplaceBlocks() async throws {
+        let detail = try fixture("item_detail")
+        MockURLProtocol.handler = { _ in (200, detail) }
+        var body = CreateItemRequest(name: "TCG-Destined-ETB")
+        body.upcCode = "196214152045"
+        body.purchasePrice = "140.00"
+        body.itemImages = [ItemImage(imageUrl: "https://example.com/a.png")]
+        let _: ItemDetail = try await client.post("items/inventory_items/", body: body)
+        let req = try XCTUnwrap(MockURLProtocol.requests.first)
+        let bodyData = try XCTUnwrap(req.bodyData)
+        let sent = try XCTUnwrap(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        XCTAssertEqual(sent["name"] as? String, "TCG-Destined-ETB")
+        XCTAssertEqual(sent["upc_code"] as? String, "196214152045")
+        XCTAssertEqual(sent["purchase_price"] as? String, "140.00")
+        XCTAssertEqual(sent["item_type"] as? String, "INV")
+        XCTAssertEqual(sent["weight_unit"] as? String, "Pounds")
+        XCTAssertNil(sent["description"])   // nulls omitted, never ""
+        // The backend requires all seven marketplace blocks and marketplace_pricing, even when unused.
+        for key in ["amazon_marketplace", "ebay_marketplace", "walmart_marketplace", "target_marketplace", "best_buy_marketplace", "macys_marketplace", "mercado_marketplace"] {
+            XCTAssertNotNil(sent[key] as? [String: Any], "missing \(key)")
+        }
+        XCTAssertEqual((sent["amazon_marketplace"] as? [String: Any])?["amazon_fba_account_1"] as? Bool, false)
+        XCTAssertEqual((sent["ebay_marketplace"] as? [String: Any])?.count, 0)
+        XCTAssertEqual((sent["marketplace_pricing"] as? [Any])?.count, 0)
+        XCTAssertEqual(((sent["item_images"] as? [[String: Any]])?.first?["image_url"]) as? String, "https://example.com/a.png")
+    }
+
+    func testUpcLookupIsAPathSegmentAndDetailRoutesByType() {
+        XCTAssertEqual(Endpoints.upcLookup(" 196214152045 "), "items/get_item_upc/196214152045/")
+        XCTAssertEqual(Endpoints.itemDetail(6690, type: "INV"), "items/inventory_items/6690/")
+        XCTAssertEqual(Endpoints.itemDetail(7, type: "KIT"), "items/kit_package_items/7/")
+        XCTAssertEqual(Endpoints.itemHistory(8, type: "VAR"), "items/variant_items/8/history/")
+        XCTAssertEqual(Endpoints.itemDetail(9, type: nil), "items/inventory_items/9/")
+        XCTAssertNil(ItemTypes.badge("INV"))
+        XCTAssertEqual(ItemTypes.badge("kit_package"), "Kit")
+    }
+
+    func testExpiringAccessTokenIsRefreshedBeforeTheRequest() async throws {
+        store.save(Session(tenant: "demo", access: "stale", refresh: "refresh-1", accessExpiration: "2020-01-01T00:00:00Z"))
+        let warehouses = try fixture("warehouses")
+        MockURLProtocol.handler = { req in
+            if req.url!.absoluteString.hasSuffix("/auth/token/refresh/") { return (200, Data(#"{"access":"fresh","access_expiration":"2099-01-01T00:00:00Z"}"#.utf8)) }
+            return (200, warehouses)
+        }
+        let page: Page<Warehouse> = try await client.get("items/warehouses/")
+        XCTAssertEqual(page.results.count, 3)
+        XCTAssertEqual(MockURLProtocol.requests.count, 2)
+        XCTAssertTrue(MockURLProtocol.requests[0].url!.absoluteString.hasSuffix("/clients/demo/api/v1/auth/token/refresh/"))
+        XCTAssertEqual(MockURLProtocol.requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer fresh")
+        XCTAssertEqual(store.load()?.access, "fresh")
+        XCTAssertEqual(store.load()?.provider, Session.providerBackend)
+    }
+
+    func testOlderSessionsDecodeWithoutProvider() throws {
+        let legacy = Data(#"{"tenant":"demo","access":"a","refresh":"r","email":"x@y.z"}"#.utf8)
+        let s = try JSONDecoder().decode(Session.self, from: legacy)
+        XCTAssertEqual(s.provider, Session.providerBackend)
+        XCTAssertNil(s.firebaseTenantId)
+        XCTAssertFalse(s.isAccessExpiring())   // unknown expiry → not expiring
+        XCTAssertTrue(Session(tenant: "d", access: "a", accessExpiration: "2020-01-01T00:00:00Z").isAccessExpiring())
+    }
+
     func testLoginStoresSessionAndSecondFactorIsSurfaced() async throws {
         store.clear()
         let me = try fixture("users_me")
         MockURLProtocol.handler = { req in
-            if req.url!.absoluteString.hasSuffix("/auth/login/") { return (200, Data(#"{"access":"a1","refresh":"r1","access_expiration":"2026-10-04T01:00:00Z"}"#.utf8)) }
+            if req.url!.absoluteString.hasSuffix("/auth/login/") { return (200, Data(#"{"access":"a1","refresh":"r1","access_expiration":"2099-01-01T00:00:00Z"}"#.utf8)) }
             return (200, me)
         }
         let auth = AuthService(client: client)

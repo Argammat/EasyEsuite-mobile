@@ -234,6 +234,23 @@ struct ChipRow<Value: Hashable>: View {
     }
 }
 
+/// A single toggle-style chip (multi-select filters), matching ChipRow's look.
+struct FilterChip: View {
+    let label: String
+    let selected: Bool
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Text(label).font(.subheadline)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(selected ? Brand.blue : Color(.secondarySystemBackground))
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct SectionHeader: View {
     let text: String
     var body: some View { Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(Brand.blue).padding(.top, 8) }

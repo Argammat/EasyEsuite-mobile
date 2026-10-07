@@ -41,9 +41,23 @@ app/src/main/kotlin/com/easyesuite/app/
   ui/scan/             CameraX + ML Kit scanner, scan-result router (item / shipment / order / create item)
 ```
 
+## Sign-in configuration
+
+The backend expects `Authorization: Bearer <firebase_id_token>` (sign in with Firebase / Identity Platform against the
+workspace's Firebase tenant id). Two strategies are built in — see `../docs/API_MAP.md` → Auth:
+
+| Build setting | Effect |
+|---|---|
+| `-Peasyesuite.firebaseApiKey=…` or `EASYESUITE_FIREBASE_API_KEY` | Firebase web API key → sign in against Identity Platform directly (`auth/FirebaseAuth.kt`) |
+| `-Peasyesuite.firebaseTenantId=…` or `EASYESUITE_FIREBASE_TENANT_ID` | Identity Platform tenant id for a single-tenant build (otherwise resolved per company via `TenantDirectory`, an ASSUMED endpoint) |
+| *(nothing)* | Backend-proxied `auth/login/` + `auth/token/refresh/` flow |
+
+Access tokens are renewed ~60 s before `access_expiration` (Firebase ID tokens live an hour) and once more on a 401.
+
 ## First run checklist
 
 1. Sign in with **company = your tenant slug** (e.g. `nationwide`), email, password.
 2. If login fails with a 404 → the login path differs; fix `Endpoints.LOGIN` in `ApiConfig.kt`.
    If it returns 200 but the app says "no access token" → map the field names in `auth/Session.kt` → `TokenResponse`.
+   If the team confirms Firebase sign-in, set the two build settings above instead.
 3. Everything marked **ASSUMED** in `../docs/API_MAP.md` should be confirmed against the web app's DevTools once; each lives in exactly one request class.

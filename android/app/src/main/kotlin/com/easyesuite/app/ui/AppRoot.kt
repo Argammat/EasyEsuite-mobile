@@ -57,7 +57,7 @@ object Routes {
     const val ORDERS = "orders"
     const val MORE = "more"
 
-    const val ITEM_DETAIL = "item/{id}"
+    const val ITEM_DETAIL = "item/{id}?type={type}"
     const val ITEM_NEW = "item/new?upc={upc}"
     const val ORDER_DETAIL = "order/{id}"
     const val SHIPMENT_DETAIL = "shipment/{id}"
@@ -71,7 +71,8 @@ object Routes {
     const val ASSISTANT = "assistant"
     const val SETTINGS = "settings"
 
-    fun item(id: Long) = "item/$id"
+    /** `type` is the row's `item_type` (INV/KIT/VAR) so the detail screen can hit the type-specific endpoint. */
+    fun item(id: Long, type: String? = null) = "item/$id" + (type?.takeIf { it.isNotBlank() }?.let { "?type=${android.net.Uri.encode(it)}" } ?: "")
     fun newItem(upc: String? = null) = "item/new" + (upc?.let { "?upc=$it" } ?: "")
     fun order(id: Long) = "order/$id"
     fun shipment(id: String) = "shipment/$id"
@@ -145,8 +146,14 @@ private fun AppNavHost(nav: NavHostController, graph: AppContainer.Graph, contai
         composable(Routes.ORDERS) { OrdersScreen(graph, nav) }
         composable(Routes.MORE) { MoreScreen(graph, nav, container) }
 
-        composable(Routes.ITEM_DETAIL, arguments = listOf(navArgument("id") { type = NavType.LongType })) {
-            ItemDetailScreen(graph, nav, it.arguments!!.getLong("id"))
+        composable(
+            Routes.ITEM_DETAIL,
+            arguments = listOf(
+                navArgument("id") { type = NavType.LongType },
+                navArgument("type") { type = NavType.StringType; nullable = true; defaultValue = null },
+            ),
+        ) {
+            ItemDetailScreen(graph, nav, it.arguments!!.getLong("id"), it.arguments?.getString("type"))
         }
         composable(Routes.ITEM_NEW, arguments = listOf(navArgument("upc") { type = NavType.StringType; nullable = true; defaultValue = null })) {
             NewItemScreen(graph, nav, it.arguments?.getString("upc"))

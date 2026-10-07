@@ -15,6 +15,8 @@ import com.easyesuite.core.net.DefaultJson
 import com.easyesuite.core.repo.AssistantRepository
 import com.easyesuite.core.util.DateRange
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.mockwebserver.MockResponse
@@ -130,13 +132,39 @@ class ApiClientTest {
         assertEquals("INV", sent["item_type"]!!.jsonPrimitive.content)
         assertEquals("AVG", sent["costing_method"]!!.jsonPrimitive.content)
         assertEquals("Pounds", sent["weight_unit"]!!.jsonPrimitive.content)
-        assertFalse(sent.containsKey("description"))   // nulls omitted
+        assertFalse(sent.containsKey("description"))   // nulls omitted, never ""
         assertFalse(sent.containsKey("manufacturer"))
+        // The backend requires all seven marketplace blocks and marketplace_pricing, even when unused.
+        for (key in listOf("amazon_marketplace", "ebay_marketplace", "walmart_marketplace", "target_marketplace", "best_buy_marketplace", "macys_marketplace", "mercado_marketplace")) {
+            assertTrue("missing $key", sent.containsKey(key))
+        }
+        assertEquals(false, sent["amazon_marketplace"]!!.jsonObject["amazon_fba_account_1"]!!.jsonPrimitive.boolean)
+        assertEquals(0, sent["marketplace_pricing"]!!.jsonArray.size)
+        assertEquals(0, sent["ebay_marketplace"]!!.jsonObject.size)
+    }
+
+    @Test fun `upc lookup uses a path segment and typed detail endpoints route by item type`() {
+        assertEquals("items/get_item_upc/196214152045/", Endpoints.upcLookup(" 196214152045 "))
+        assertEquals("items/inventory_items/6690/", Endpoints.itemDetail(6690, "INV"))
+        assertEquals("items/kit_package_items/7/", Endpoints.itemDetail(7, "KIT"))
+        assertEquals("items/variant_items/8/history/", Endpoints.itemHistory(8, "VAR"))
+        assertEquals("items/inventory_items/9/", Endpoints.itemDetail(9, null))
+    }
+
+    @Test fun `expired access tokens are refreshed before the request`() = runTest {
+        store.save(Session(tenant = "demo", access = "stale", refresh = "refresh-1", accessExpiration = "2020-01-01T00:00:00Z"))
+        server.enqueue(MockResponse().setBody("""{"access":"fresh","access_expiration":"2099-01-01T00:00:00Z"}"""))
+        server.enqueue(MockResponse().setBody(Fixtures.read("warehouses.json")))
+        val page: Page<com.easyesuite.core.model.Warehouse> = client.get("items/warehouses/")
+        assertEquals(3, page.results.size)
+        assertEquals("/clients/demo/api/v1/auth/token/refresh/", server.takeRequest().path)
+        assertEquals("Bearer fresh", server.takeRequest().getHeader("Authorization"))
+        assertEquals("fresh", store.load()!!.access)
     }
 
     @Test fun `login stores a session and me() decodes`() = runTest {
         store.clear()
-        server.enqueue(MockResponse().setBody("""{"access":"a1","refresh":"r1","access_expiration":"2026-10-04T01:00:00Z","refresh_expiration":"2026-10-11T00:00:00Z","user":{"pk":1}}"""))
+        server.enqueue(MockResponse().setBody("""{"access":"a1","refresh":"r1","access_expiration":"2099-01-01T00:00:00Z","refresh_expiration":"2099-01-08T00:00:00Z","user":{"pk":1}}"""))
         server.enqueue(MockResponse().setBody(Fixtures.read("users_me.json")))
         val auth = AuthService(client)
         val result = auth.login("user@example.com", "pw")

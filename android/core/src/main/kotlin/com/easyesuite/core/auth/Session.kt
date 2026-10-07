@@ -15,7 +15,22 @@ data class Session(
     @SerialName("access_expiration") val accessExpiration: String? = null,
     @SerialName("refresh_expiration") val refreshExpiration: String? = null,
     val email: String? = null,
-)
+    /** Who minted the tokens: [PROVIDER_FIREBASE] (Identity Platform) or [PROVIDER_BACKEND] (auth/login/). */
+    val provider: String = PROVIDER_BACKEND,
+    /** Identity Platform tenant the user signed in against (Firebase flow only); kept so the next launch reuses it. */
+    @SerialName("firebase_tenant_id") val firebaseTenantId: String? = null,
+) {
+    /** True when the access token expires within [skewSeconds] (or already has). Unknown expiry → false. */
+    fun isAccessExpiring(skewSeconds: Long = 60, now: java.time.Instant = java.time.Instant.now()): Boolean {
+        val exp = com.easyesuite.core.util.DateText.parse(accessExpiration) ?: return false
+        return !exp.isAfter(now.plusSeconds(skewSeconds))
+    }
+
+    companion object {
+        const val PROVIDER_FIREBASE = "firebase"
+        const val PROVIDER_BACKEND = "backend"
+    }
+}
 
 /** Storage abstraction so the core stays platform-free. */
 interface TokenStore {

@@ -5,6 +5,10 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+/** Gradle property, else environment variable, else "" — for build-time secrets that must not be committed. */
+fun prop(gradleName: String, envName: String): String =
+    (project.findProperty(gradleName) as String?)?.trim() ?: System.getenv(envName)?.trim() ?: ""
+
 android {
     namespace = "com.easyesuite.app"
     compileSdk = 35
@@ -18,6 +22,12 @@ android {
         vectorDrawables.useSupportLibrary = true
         buildConfigField("String", "API_ROOT", "\"https://api-new.easyesuite.com/\"")
         buildConfigField("String", "DEFAULT_TENANT", "\"\"")
+        // Firebase / Identity Platform sign-in (the backend expects a Firebase ID token as Bearer).
+        // Leave the key empty to use the backend-proxied auth/login/ flow instead. Supply via
+        //   -Peasyesuite.firebaseApiKey=... / -Peasyesuite.firebaseTenantId=...   or
+        //   EASYESUITE_FIREBASE_API_KEY / EASYESUITE_FIREBASE_TENANT_ID environment variables.
+        buildConfigField("String", "FIREBASE_API_KEY", "\"${prop("easyesuite.firebaseApiKey", "EASYESUITE_FIREBASE_API_KEY")}\"")
+        buildConfigField("String", "FIREBASE_TENANT_ID", "\"${prop("easyesuite.firebaseTenantId", "EASYESUITE_FIREBASE_TENANT_ID")}\"")
     }
 
     buildTypes {

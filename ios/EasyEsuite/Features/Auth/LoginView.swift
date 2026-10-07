@@ -23,8 +23,12 @@ final class LoginModel: ObservableObject {
     func submit(container: AppContainer) {
         guard canSubmit else { return }
         busy = true; error = nil
-        let graph = container.makeGraph(tenant: tenant)
         Task {
+            // Firebase sign-in needs the workspace's Identity Platform tenant id; the global directory maps the
+            // company name to it (falls back to the build-time default, then to project-level users).
+            var identityTenant: String?
+            if container.firebaseSignIn { identityTenant = await container.tenantDirectory.lookup(tenant)?.firebaseTenantId }
+            let graph = container.makeGraph(tenant: tenant, firebaseTenantId: identityTenant)
             do {
                 switch try await graph.auth.login(email: email, password: password) {
                 case .success(let session): container.signedIn(session, using: graph)

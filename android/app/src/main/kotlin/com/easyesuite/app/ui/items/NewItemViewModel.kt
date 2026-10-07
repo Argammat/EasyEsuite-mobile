@@ -5,8 +5,10 @@ import androidx.lifecycle.viewModelScope
 import com.easyesuite.app.di.AppContainer
 import com.easyesuite.app.ui.common.userMessage
 import com.easyesuite.core.model.CreateItemRequest
+import com.easyesuite.core.model.ItemCondition
 import com.easyesuite.core.model.ItemDetail
 import com.easyesuite.core.model.ItemImage
+import com.easyesuite.core.model.TaxSchedule
 import com.easyesuite.core.model.Warehouse
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
@@ -32,7 +34,10 @@ data class NewItemForm(
     val height: String = "",
     val dimensionUnit: String = "Inches",
     val reorderPoint: String = "",
-    val conditionNew: Boolean = true,
+    /** Id from `items/item_conditions/`; null = let the backend default. */
+    val conditionId: Int? = null,
+    /** Id from `items/tax_schedules/`; null = let the backend default. */
+    val taxScheduleId: Int? = null,
     val initialQty: String = "",
     val warehouseId: Int? = null,
 ) {
@@ -57,6 +62,8 @@ data class NewItemUi(
     val form: NewItemForm = NewItemForm(),
     val photos: List<PhotoEntry> = emptyList(),
     val warehouses: List<Warehouse> = emptyList(),
+    val conditions: List<ItemCondition> = emptyList(),
+    val taxSchedules: List<TaxSchedule> = emptyList(),
     val lookingUp: Boolean = false,
     val lookupMessage: String? = null,
     val uploading: Boolean = false,
@@ -73,6 +80,19 @@ class NewItemViewModel(private val graph: AppContainer.Graph, initialUpc: String
         viewModelScope.launch {
             runCatching { graph.items.warehouses() }.onSuccess { list ->
                 ui.update { it.copy(warehouses = list, form = it.form.copy(warehouseId = it.form.warehouseId ?: list.firstOrNull { w -> w.isDefault }?.id ?: list.firstOrNull()?.id)) }
+            }
+        }
+        // Form dropdowns (`items/item_conditions/`, `items/tax_schedules/`). Defaults: the "New" condition, the default schedule.
+        viewModelScope.launch {
+            runCatching { graph.items.conditions() }.onSuccess { list ->
+                val preferred = list.firstOrNull { it.name.equals("new", ignoreCase = true) } ?: list.firstOrNull()
+                ui.update { it.copy(conditions = list, form = it.form.copy(conditionId = it.form.conditionId ?: preferred?.id)) }
+            }
+        }
+        viewModelScope.launch {
+            runCatching { graph.items.taxSchedules() }.onSuccess { list ->
+                val preferred = list.firstOrNull { it.isDefault == true } ?: list.firstOrNull()
+                ui.update { it.copy(taxSchedules = list, form = it.form.copy(taxScheduleId = it.form.taxScheduleId ?: preferred?.id)) }
             }
         }
         if (!initialUpc.isNullOrBlank()) lookupUpc()
@@ -167,7 +187,8 @@ class NewItemViewModel(private val graph: AppContainer.Graph, initialUpc: String
                     height = f.height.ifBlank { null },
                     dimensionUnit = if (listOf(f.length, f.width, f.height).any { it.isNotBlank() }) f.dimensionUnit else null,
                     reorderPoint = f.reorderPoint.toIntOrNull(),
-                    conditionId = if (f.conditionNew) 1 else null,
+                    conditionId = f.conditionId,
+                    taxSchedule = f.taxScheduleId,
                     salesDescription = f.description.trim().ifBlank { null },
                     images = s.photos.filter { it.selected }.map { ItemImage(it.url) },
                 )

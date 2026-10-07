@@ -8,15 +8,36 @@ import com.easyesuite.core.net.ApiException
 import kotlinx.serialization.json.JsonElement
 
 /**
- * Login / 2FA / refresh against the tenant-scoped `auth/…` endpoints.
+ * Login / 2FA / me for the tenant.
  *
- * The web app stores `accessToken`, `refreshToken`, `access_expiration` and `refresh_expiration`
- * after login, which is exactly dj-rest-auth's JWT response, so that is what we expect here.
- * If the captured login response uses different keys, change [TokenResponse] only.
+ * Two strategies, chosen by `ApiConfig.firebase`:
+ *  - **Firebase direct** (backend team's description): email/password → Identity Platform sign-in against the
+ *    workspace's tenant id; the Firebase ID token is sent as `Authorization: Bearer`.
+ *  - **Backend-proxied** (what the web app's stored `accessToken`/`refreshToken`/`access_expiration` keys suggest):
+ *    `POST auth/login/` returns the tokens; refresh is `POST auth/token/refresh/`.
+ * Switching is a config change; nothing in the UI knows which one is in use.
  */
-class AuthService(private val client: ApiClient) {
+class AuthService(
+    private val client: ApiClient,
+    private val firebase: FirebaseAuth? = client.config.firebase?.let { FirebaseAuth(it) },
+) {
 
     suspend fun login(email: String, password: String): LoginResult {
+        val fb = firebase
+        if (fb != null) {
+            val tokens = fb.signIn(email, password)
+            val session = Session(
+                tenant = client.config.tenant,
+                access = tokens.idToken,
+                refresh = tokens.refreshToken.ifBlank { null },
+                accessExpiration = tokens.expiresAtIso,
+                email = email.trim(),
+                provider = Session.PROVIDER_FIREBASE,
+                firebaseTenantId = fb.config.tenantId,
+            )
+            client.tokenStore.save(session)
+            return LoginResult.Success(session)
+        }
         val res: TokenResponse = client.post(Endpoints.LOGIN, LoginRequest(email.trim(), password), authenticated = false)
         return handle(res, email)
     }
@@ -41,6 +62,7 @@ class AuthService(private val client: ApiClient) {
             accessExpiration = res.accessExpiration,
             refreshExpiration = res.refreshExpiration,
             email = email.trim(),
+            provider = Session.PROVIDER_BACKEND,
         )
         client.tokenStore.save(session)
         return LoginResult.Success(session)

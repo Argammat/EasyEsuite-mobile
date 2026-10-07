@@ -49,17 +49,30 @@ import com.easyesuite.app.ui.common.Thumb
 import com.easyesuite.app.ui.common.userMessage
 import com.easyesuite.app.ui.theme.Amber
 import com.easyesuite.app.ui.theme.Green
+import com.easyesuite.core.ItemTypes
 import com.easyesuite.core.Marketplaces
 import com.easyesuite.core.model.ItemDetail
+import com.easyesuite.core.model.ItemHistoryEntry
 import com.easyesuite.core.model.WarehouseStock
 import com.easyesuite.core.util.DateText
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 
-data class ItemDetailUi(val item: ItemDetail, val stock: List<WarehouseStock>, val stockError: String? = null)
+data class ItemDetailUi(
+    val item: ItemDetail,
+    val stock: List<WarehouseStock>,
+    val stockError: String? = null,
+    /** null while loading; empty when the item has no movements. */
+    val history: List<ItemHistoryEntry>? = null,
+    val historyError: String? = null,
+)
 
-class ItemDetailViewModel(private val graph: AppContainer.Graph, private val id: Long) : ViewModel() {
+/**
+ * Detail comes from the type-specific endpoint (`inventory_items` / `kit_package_items` / `variant_items`),
+ * stock per warehouse from `warehouse_inventory_items/?item=`, movements from `.../{id}/history/`.
+ */
+class ItemDetailViewModel(private val graph: AppContainer.Graph, private val id: Long, private val itemType: String?) : ViewModel() {
     val state = MutableStateFlow<Load<ItemDetailUi>>(Load.Loading)
 
     init { load() }
@@ -68,21 +81,30 @@ class ItemDetailViewModel(private val graph: AppContainer.Graph, private val id:
         state.value = Load.Loading
         viewModelScope.launch {
             try {
-                val itemDeferred = async { graph.items.item(id) }
+                val itemDeferred = async { graph.items.item(id, itemType ?: ItemTypes.INVENTORY) }
                 val stock = runCatching { graph.items.stockByWarehouse(id) }
                 val item = itemDeferred.await()
                 state.value = Load.Ready(ItemDetailUi(item, stock.getOrDefault(emptyList()), stock.exceptionOrNull()?.userMessage()))
+                loadHistory(item.itemType ?: itemType)
             } catch (e: Exception) {
                 state.value = Load.Failed(e.userMessage())
             }
         }
     }
+
+    private suspend fun loadHistory(type: String?) {
+        val result = runCatching { graph.items.history(id, type) }
+        val current = state.value as? Load.Ready<ItemDetailUi> ?: return
+        state.value = Load.Ready(
+            current.value.copy(history = result.getOrDefault(emptyList()), historyError = result.exceptionOrNull()?.userMessage()),
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ItemDetailScreen(graph: AppContainer.Graph, nav: NavHostController, id: Long) {
-    val vm: ItemDetailViewModel = viewModel(key = "item-$id") { ItemDetailViewModel(graph, id) }
+fun ItemDetailScreen(graph: AppContainer.Graph, nav: NavHostController, id: Long, itemType: String? = null) {
+    val vm: ItemDetailViewModel = viewModel(key = "item-$id") { ItemDetailViewModel(graph, id, itemType) }
     val state by vm.state.collectAsState()
 
     Scaffold(
@@ -117,7 +139,10 @@ private fun ItemDetailBody(ui: ItemDetailUi, modifier: Modifier, nav: NavHostCon
         }
         Text(item.displayTitle, style = MaterialTheme.typography.titleMedium)
         Text(
-            listOfNotNull(item.upcCode?.let { "UPC $it" }, item.brand, item.conditionName).joinToString(" · "),
+            listOfNotNull(
+                ItemTypes.label(item.itemType).takeIf { ItemTypes.normalize(item.itemType) != ItemTypes.INVENTORY && it != "—" },
+                item.upcCode?.let { "UPC $it" }, item.brand, item.conditionName,
+            ).joinToString(" · "),
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
         )
 
@@ -164,7 +189,32 @@ private fun ItemDetailBody(ui: ItemDetailUi, modifier: Modifier, nav: NavHostCon
             SectionTitle("Description")
             Text(item.description!!, style = MaterialTheme.typography.bodyMedium)
         }
+
+        SectionTitle("History")
+        when {
+            ui.historyError != null -> Text(ui.historyError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            ui.history == null -> Text("Loading movements…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            ui.history.isEmpty() -> Text("No stock movements recorded.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            else -> ui.history.take(50).forEach { HistoryRow(it) }
+        }
         Spacer(Modifier.height(32.dp))
+    }
+}
+
+@Composable
+private fun HistoryRow(entry: ItemHistoryEntry) {
+    val delta = entry.delta
+    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(entry.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+            val meta = listOfNotNull(entry.timestamp?.let { DateText.short(it) }, entry.detail.takeIf { it.isNotBlank() }).joinToString(" · ")
+            if (meta.isNotBlank()) Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        if (delta != null) {
+            val whole = delta == Math.floor(delta)
+            val text = (if (delta > 0) "+" else "") + (if (whole) "%d".format(delta.toLong()) else "%.2f".format(delta))
+            Text(text, style = MaterialTheme.typography.titleSmall, color = if (delta < 0) Amber else if (delta > 0) Green else MaterialTheme.colorScheme.outline)
+        }
     }
 }
 

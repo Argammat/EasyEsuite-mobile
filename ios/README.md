@@ -37,8 +37,24 @@ EasyEsuite/
   Scanner/               ScannerSheet (AVFoundation), ScanResultView (item / shipment / order / create)
 ```
 
+## Sign-in configuration
+
+The backend expects `Authorization: Bearer <firebase_id_token>` (sign in with Firebase / Identity Platform against the
+workspace's Firebase tenant id). Two strategies are built in — see `../docs/API_MAP.md` → Auth. `AppConfig` reads them
+from Info.plist, which `project.yml` fills from build settings so real keys stay out of git:
+
+| Build setting (`xcodebuild … SETTING=value` or an untracked xcconfig) | Effect |
+|---|---|
+| `EASYESUITE_FIREBASE_API_KEY` | Firebase web API key → sign in against Identity Platform directly (`Auth/FirebaseAuth.swift`) |
+| `EASYESUITE_FIREBASE_TENANT_ID` | Identity Platform tenant id for a single-tenant build (otherwise resolved per company via `TenantDirectory`, an ASSUMED endpoint) |
+| `EASYESUITE_API_ROOT` | Override the API host (defaults to production) |
+| *(nothing)* | Backend-proxied `auth/login/` + `auth/token/refresh/` flow |
+
+Access tokens are renewed ~60 s before `access_expiration` (Firebase ID tokens live an hour) and once more on a 401.
+
 ## First run checklist
 
 1. Sign in with **company = your tenant slug** (e.g. `nationwide`), email, password.
 2. 404 on login → fix `Endpoints.login` in `ApiConfig.swift`. 200 but "no access token" → map the field names in `Auth/Session.swift` → `TokenResponse`.
+   If the team confirms Firebase sign-in, set the build settings above instead.
 3. Confirm the **ASSUMED** rows in `../docs/API_MAP.md` with one DevTools capture; each lives in one `*Request` struct.
