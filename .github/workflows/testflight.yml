@@ -28,7 +28,6 @@ jobs:
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       PROFILE_NAME: EasyEsuite Mobile App Store
-      KEYCHAIN: ${{ runner.temp }}/testflight.keychain-db
       KEYCHAIN_PASSWORD: ci-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +69,8 @@ jobs:
           PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
         run: |
           set -e
+          KEYCHAIN="$RUNNER_TEMP/testflight.keychain-db"
+          echo "KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"      # the runner context is not available in job-level env
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
@@ -165,4 +166,4 @@ jobs:
 
       - name: Remove keychain
         if: always()
-        run: security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+        run: '[ -n "$KEYCHAIN" ] && security delete-keychain "$KEYCHAIN" 2>/dev/null || true'
