@@ -18,8 +18,11 @@ data class ApiConfig(
      */
     val firebase: FirebaseConfig? = null,
 ) {
+    /** The tenant as it appears in URLs and sessions: trimmed, lower-case. */
+    val schemaName: String get() = tenant.trim().lowercase()
+
     val tenantRoot: String
-        get() = apiRoot.trimEnd('/') + "/clients/" + tenant.trim().lowercase() + "/api/v1/"
+        get() = apiRoot.trimEnd('/') + "/clients/" + schemaName + "/api/v1/"
 
     val globalRoot: String
         get() = apiRoot.trimEnd('/') + "/api/v1/"

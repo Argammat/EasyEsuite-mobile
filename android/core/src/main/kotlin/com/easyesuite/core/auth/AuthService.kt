@@ -70,7 +70,7 @@ class AuthService(
             throw ApiException.Decoding(IllegalStateException("Login response had no access token"), null)
         }
         val session = Session(
-            tenant = client.config.tenant,
+            tenant = client.config.schemaName,
             access = access,
             refresh = res.resolvedRefresh,
             accessExpiration = res.accessExpiration ?: Jwt.expirationIso(access),
