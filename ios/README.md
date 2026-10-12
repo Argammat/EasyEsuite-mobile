@@ -20,8 +20,9 @@ to App Store Connect; `scripts/asc-bootstrap.py` does the one-time certificate/p
 ```
 EasyEsuiteKit/Sources/EasyEsuiteKit/
   ApiConfig.swift        base URL, tenant prefix, every endpoint path, marketplace ids
-  Net/APIClient.swift    request/response, Bearer header, 401 → refresh → retry, DRF error parsing
-  Auth/                  Session, TokenStore (+Keychain), AuthService (login / 2FA / me / tenants)
+  Net/APIClient.swift    request/response, Bearer header, proactive + 401 refresh with rotating refresh tokens, DRF error parsing
+  Net/FirestoreClient.swift  read-only Firestore REST client (Copilot history, notifications) with the typed-value decoder
+  Auth/                  Session, TokenStore (+Keychain), AuthService (workspaces → login → Firebase custom token, 2FA, me), JWT claims
   Model/                 Items, Orders (+Shipments), Purchasing, Reports (+JSONValue), User, Money, Page
   Repo/                  ItemsRepository + InventoryRepository, OrdersRepository + ShippingRepository + ReportsRepository + AssistantRepository
   Util/Dates.swift       DateRange presets → inclusive UTC bounds in the user's zone
@@ -44,24 +45,26 @@ ExportOptions.plist      App Store Connect upload options used by the TestFlight
 scripts/asc-bootstrap.py One-time App Store Connect setup (bundle ID, distribution certificate, profile)
 ```
 
-## Sign-in configuration
+## Sign-in and environment configuration
 
-The backend expects `Authorization: Bearer <firebase_id_token>` (sign in with Firebase / Identity Platform against the
-workspace's Firebase tenant id). Two strategies are built in — see `../docs/API_MAP.md` → Auth. `AppConfig` reads them
-from Info.plist, which `project.yml` fills from build settings so real keys stay out of git:
+Sign-in is the backend's three-step flow (`../docs/API_MAP.md` → Auth): `POST api/v1/auth/login/tenants/` lists the
+user's workspaces, the chosen workspace is logged into at `clients/{schema_name}/api/v1/auth/login/`, and the
+`firebase_custom_token` from that response is exchanged for a Firebase ID token that only the Firestore-backed
+screens use (Copilot history, notifications, connector status). `AppConfig` reads the environment from Info.plist,
+which `project.yml` fills from build settings defined in `Config/Environment.xcconfig`:
 
-| Build setting (`xcodebuild … SETTING=value` or an untracked xcconfig) | Effect |
+| Build setting | Effect |
 |---|---|
-| `EASYESUITE_FIREBASE_API_KEY` | Firebase web API key → sign in against Identity Platform directly (`Auth/FirebaseAuth.swift`) |
-| `EASYESUITE_FIREBASE_TENANT_ID` | Identity Platform tenant id for a single-tenant build (otherwise resolved per company via `TenantDirectory`, an ASSUMED endpoint) |
-| `EASYESUITE_API_ROOT` | Override the API host (defaults to production) |
-| *(nothing)* | Backend-proxied `auth/login/` + `auth/token/refresh/` flow |
+| `EASYESUITE_API_ROOT` | API host; empty = production `api-new.easyesuite.com` |
+| `EASYESUITE_FIREBASE_API_KEY`, `EASYESUITE_FIREBASE_PROJECT_ID` | Firebase project of the **same** environment; empty = Firestore screens unavailable (REST still works) |
+| `EASYESUITE_FIRESTORE_CONNECTOR_DB`, `EASYESUITE_FIRESTORE_NOTIFICATIONS_DB` | the two named Firestore databases |
 
-Access tokens are renewed ~60 s before `access_expiration` (Firebase ID tokens live an hour) and once more on a 401.
+Real values live in `Config/Environment.local.xcconfig` (git-ignored; copy `Environment.local.xcconfig.example`) or are
+passed on the `xcodebuild` command line in CI — never committed, the repository is public. Settings shows the
+environment name; non-production builds also print it on the login screen.
 
 ## First run checklist
 
-1. Sign in with your **email and password**, then pick the workspace (e.g. `nationwide`) — the same flow as erp.easyesuite.com. With one workspace the picker is skipped; "Switch workspace" lives in Settings.
-2. 404 on login → fix `Endpoints.login` in `ApiConfig.swift`. 200 but "no access token" → map the field names in `Auth/Session.swift` → `TokenResponse`.
-   If the team confirms Firebase sign-in, set the build settings above instead.
-3. Confirm the **ASSUMED** rows in `../docs/API_MAP.md` with one DevTools capture; each lives in one `*Request` struct.
+1. Sign in with your **email and password**, then pick the workspace — the same flow as erp.easyesuite.com. With one workspace the picker is skipped; "Switch workspace" (Settings) asks for the password again because the backend's login is per workspace.
+2. "Live data: Connected" in Settings means the Firebase custom-token sign-in worked for this workspace.
+3. Confirm the remaining **ASSUMED** rows in `../docs/API_MAP.md` (the MFA body and the write bodies); each lives in one `*Request` struct.

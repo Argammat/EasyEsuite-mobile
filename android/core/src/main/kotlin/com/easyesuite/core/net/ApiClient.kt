@@ -2,8 +2,6 @@ package com.easyesuite.core.net
 
 import com.easyesuite.core.ApiConfig
 import com.easyesuite.core.auth.BackendTokenRefresher
-import com.easyesuite.core.auth.FirebaseAuth
-import com.easyesuite.core.auth.FirebaseTokenRefresher
 import com.easyesuite.core.auth.Session
 import com.easyesuite.core.auth.TokenRefresher
 import com.easyesuite.core.auth.TokenStore
@@ -46,24 +44,21 @@ class ApiClient(
     baseClient: OkHttpClient = OkHttpClient(),
     /** Called once when a refresh fails and the user must sign in again. */
     var onSessionExpired: (() -> Unit)? = null,
-    /**
-     * How an expired access token is renewed. When null the strategy follows the session: tokens minted by
-     * Firebase (`Session.provider == firebase`) go through the securetoken exchange (needs `config.firebase`),
-     * everything else through the backend's `auth/token/refresh/`.
-     */
+    /** How an expired access token is renewed; null = [BackendTokenRefresher] (rotating refresh tokens). */
     private val refresherOverride: TokenRefresher? = null,
 ) {
-    private val firebaseRefresher: TokenRefresher? = config.firebase?.let { FirebaseTokenRefresher(FirebaseAuth(it, baseClient)) }
     private val backendRefresher: TokenRefresher = BackendTokenRefresher(this)
 
-    private fun refresherFor(session: Session): TokenRefresher = refresherOverride
-        ?: if (session.provider == Session.PROVIDER_FIREBASE) (firebaseRefresher ?: backendRefresher) else backendRefresher
+    private fun refresherFor(@Suppress("UNUSED_PARAMETER") session: Session): TokenRefresher = refresherOverride ?: backendRefresher
 
     private val http: OkHttpClient = baseClient.newBuilder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
+
+    /** The OkHttp client this API client sends on — shared with [com.easyesuite.core.auth.FirebaseAuth] / [FirestoreClient] so tests mock everything at once. */
+    val httpClient: OkHttpClient get() = http
 
     private val refreshMutex = Mutex()
 
@@ -135,7 +130,7 @@ class ApiClient(
     private suspend fun send(method: String, url: HttpUrl, body: RequestBody?, authenticated: Boolean): RawResponse {
         var token = if (authenticated) tokenStore.load()?.access else null
         if (authenticated && tokenStore.load()?.isAccessExpiring() == true) {
-            // Firebase ID tokens live an hour; renew before the call instead of eating a 401 round-trip.
+            // Access tokens live 5 minutes; renew before the call instead of eating a 401 round-trip.
             refreshAccessToken()?.let { token = it }
         }
         var response = call(method, url, body, token)

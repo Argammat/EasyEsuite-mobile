@@ -1,0 +1,8 @@
+// Copy to Environment.local.xcconfig (git-ignored) and fill in one environment's values from the backend
+// team's "Mobile App — API Integration Answers" document. Base URL and Firebase config must come from the
+// SAME environment. Non-production builds stay on TestFlight internal testing.
+EASYESUITE_API_ROOT = https:/$()/stg-api.easyesuite.com/
+EASYESUITE_FIREBASE_API_KEY = AIza…
+EASYESUITE_FIREBASE_PROJECT_ID = your-firebase-project-id
+EASYESUITE_FIRESTORE_CONNECTOR_DB = connector-db-stg
+EASYESUITE_FIRESTORE_NOTIFICATIONS_DB = notifications-db-stg

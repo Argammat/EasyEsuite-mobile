@@ -67,6 +67,9 @@ object DateText {
         }
     }
 
+    /** `2026-10-07T09:41:22Z` — whole seconds, UTC. */
+    fun iso8601(instant: Instant): String = DateTimeFormatter.ISO_INSTANT.format(instant.truncatedTo(ChronoUnit.SECONDS))
+
     fun short(raw: String?, zone: ZoneId = ZoneId.systemDefault()): String =
         parse(raw)?.atZone(zone)?.format(display) ?: "—"
 

@@ -21,6 +21,15 @@ import com.easyesuite.core.net.DefaultJson
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
+import com.easyesuite.core.model.HistoryFilter
+import com.easyesuite.core.model.ItemAuditEntry
+import com.easyesuite.core.net.FirestoreValue
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.double
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -230,5 +239,49 @@ class ModelDecodingTest {
         assertEquals("Test Test", me.displayName)
         assertTrue(me.isAdmin)
         assertEquals("user@example.com", me.email)
+    }
+
+    /** Backend answers 2026-10-09: history is paginated audit entries; the web app shows one row per changed field. */
+    @Test fun `item history decodes and flattens to one row per field`() {
+        val page: Page<ItemAuditEntry> = DefaultJson.decodeFromString(Fixtures.read("item_history.json"))
+        assertEquals(137, page.count)
+        assertTrue(page.hasMore)
+        assertEquals(2, page.results.size)
+        val first = page.results[0]
+        assertEquals("update", first.action); assertEquals("jane@acme.com", first.actor); assertEquals("erp | item", first.contentType)
+        val rows = first.rows
+        assertEquals(listOf("modified_by", "sale_price"), rows.map { it.field })   // sorted by field name
+        assertEquals("Sale price", rows[1].fieldLabel)
+        assertEquals("19.99", rows[1].oldValue); assertEquals("17.49", rows[1].newValue)
+        assertEquals("jane@acme.com", rows[1].actor); assertEquals("Update", rows[1].action)
+        val created = page.results[1].rows
+        assertEquals(1, created.size)
+        assertEquals("System", created[0].actor)                          // null actor = automated change
+        assertNull(created[0].oldValue)
+        assertEquals("""[{"id":3,"qty":10}]""", created[0].newValue)      // nested JSON shown as compact text
+        assertEquals(1, HistoryFilter(action = 1, field = "sale_price").asMap()["action"])
+        assertEquals("desc", HistoryFilter().asMap()["sort_by"])
+    }
+
+    @Test fun `firestore typed values decode to plain JSON`() {
+        val raw = DefaultJson.parseToJsonElement(
+            """{"name":"projects/p/databases/d/documents/tenants/42/threads/t1",
+                "fields":{"title":{"stringValue":"Restock plan"},"messages":{"integerValue":"3"},"unread":{"booleanValue":true},
+                          "score":{"doubleValue":0.5},"gone":{"nullValue":null},"updated":{"timestampValue":"2026-10-08T14:03:11Z"},
+                          "meta":{"mapValue":{"fields":{"model":{"stringValue":"gpt"},"tags":{"arrayValue":{"values":[{"stringValue":"a"},{"integerValue":"2"}]}}}}}},
+                "updateTime":"2026-10-08T14:03:11.5Z"}""",
+        )
+        val doc = FirestoreValue.document(raw)!!
+        assertEquals("t1", doc.id)
+        assertEquals("Restock plan", doc["title"]!!.jsonPrimitive.content)
+        assertEquals(3.0, doc["messages"]!!.jsonPrimitive.double, 0.0)
+        assertTrue(doc["unread"]!!.jsonPrimitive.boolean)
+        assertEquals(JsonNull, doc["gone"])
+        assertEquals("2026-10-08T14:03:11Z", doc["updated"]!!.jsonPrimitive.content)
+        val meta = doc["meta"]!!.jsonObject
+        assertEquals("gpt", meta["model"]!!.jsonPrimitive.content)
+        assertEquals(2, meta["tags"]!!.jsonArray.size)
+        assertEquals(2.0, meta["tags"]!!.jsonArray[1].jsonPrimitive.double, 0.0)
+        assertEquals("2026-10-08T14:03:11.5Z", doc.updateTime)
     }
 }

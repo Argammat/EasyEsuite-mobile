@@ -4,7 +4,8 @@ package com.easyesuite.core
  * Where the API lives. Every EasyEsuite tenant (company) has its own URL prefix:
  *   https://api-new.easyesuite.com/clients/{tenant}/api/v1/
  *
- * `tenant` is the company slug the user enters at login (the web app calls it companyName).
+ * `tenant` is the workspace's `schema_name`. Development and staging hosts are not committed to this (public)
+ * repository; they come from build configuration.
  */
 data class ApiConfig(
     val tenant: String,
@@ -12,10 +13,8 @@ data class ApiConfig(
     /** Authorization header scheme; the backend expects `Bearer <token>`. */
     val authScheme: String = "Bearer",
     /**
-     * Firebase / Identity Platform settings. When `apiKey` is set the apps sign in against Firebase
-     * directly (the mechanism the backend team describes) and send the Firebase ID token as Bearer.
-     * When it is null they fall back to the backend-proxied `auth/login/` + `auth/token/refresh/` flow
-     * the web app's stored keys suggest. See docs/API_MAP.md → Auth.
+     * Firebase project of this environment — only needed for the Firestore-backed screens (Copilot history,
+     * notifications, connector status). Null = those screens are unavailable; the REST API still works.
      */
     val firebase: FirebaseConfig? = null,
 ) {
@@ -25,34 +24,55 @@ data class ApiConfig(
     val globalRoot: String
         get() = apiRoot.trimEnd('/') + "/api/v1/"
 
+    /** "Production" / "Staging" / "Development", derived from the host so Settings can show which backend a build talks to. */
+    val environmentName: String
+        get() {
+            val host = runCatching { java.net.URI(apiRoot).host.orEmpty().lowercase() }.getOrDefault("")
+            return when {
+                host.startsWith("stg-") || host.contains("staging") -> "Staging"
+                host.startsWith("dev-") || host.contains(".run.app") || host.contains("localhost") || host.contains("10.0.2.2") -> "Development"
+                else -> "Production"
+            }
+        }
+
     companion object {
         const val DEFAULT_API_ROOT = "https://api-new.easyesuite.com/"
     }
 }
 
 /**
- * Firebase Identity Platform configuration. The web API key is public (it ships in the web bundle);
- * the tenant id is the workspace's Identity Platform tenant (the web app stores it as `firebaseTenantId`).
+ * Firebase project settings (per environment, from build configuration — never hard-coded). The web API key
+ * and project id identify the project and ship inside the app; they grant nothing by themselves. The named
+ * Firestore databases hold the Copilot conversations / connector status and the in-app notifications.
  */
 data class FirebaseConfig(
     val apiKey: String,
-    /** Identity Platform tenant id for this workspace. Null = project-level users (no multi-tenancy). */
-    val tenantId: String? = null,
+    val projectId: String,
+    val connectorDatabase: String = "(default)",
+    val notificationsDatabase: String = "(default)",
+    /** Google endpoints; overridable so tests can point them at a mock server. */
+    val identityToolkitBase: String = "https://identitytoolkit.googleapis.com",
+    val secureTokenBase: String = "https://securetoken.googleapis.com",
+    val firestoreBase: String = "https://firestore.googleapis.com",
 ) {
-    val signInUrl: String get() = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=$apiKey"
-    val refreshUrl: String get() = "https://securetoken.googleapis.com/v1/token?key=$apiKey"
+    /** `accounts:signInWithCustomToken` — the backend hands the app a custom token at login; there is no password sign-in. */
+    val customTokenSignInUrl: String get() = "${identityToolkitBase.trimEnd('/')}/v1/accounts:signInWithCustomToken?key=$apiKey"
+    val refreshUrl: String get() = "${secureTokenBase.trimEnd('/')}/v1/token?key=$apiKey"
+    fun firestoreRoot(database: String): String = "${firestoreBase.trimEnd('/')}/v1/projects/$projectId/databases/$database/documents/"
 }
 
 /** Relative API paths, kept in one place so both the docs and the code agree. See docs/API_MAP.md. */
 object Endpoints {
-    // Auth (tenant scoped) — backend-proxied flow
+    // Auth — VERIFIED with the backend team (2026-10-09 answers)
+    /** Global (no tenant prefix): `{email, password}` → the user's workspaces, most recently used first. Returns no token. */
+    const val LOGIN_TENANTS = "auth/login/tenants/"
+    /** Tenant-scoped: `{email, password}` → `{access (5 min), refresh (1 day), firebase_custom_token?, user}`. */
     const val LOGIN = "auth/login/"
     const val LOGIN_2FA = "auth/login/2fa/"
+    /** Tenant-scoped: `{refresh}` → a NEW access and a NEW refresh (each refresh token works once). */
     const val TOKEN_REFRESH = "auth/token/refresh/"
     const val ME = "users/users/me/"
     const val MY_TENANTS = "users/me/tenants/"
-    /** Global (no tenant prefix): resolves a company name to its tenant + Firebase tenant id. ASSUMED. */
-    const val TENANT_LOOKUP = "clients/clients/"
 
     // Items (VERIFIED against the web app source, Oct 2026)
     const val ITEMS = "items/items/"

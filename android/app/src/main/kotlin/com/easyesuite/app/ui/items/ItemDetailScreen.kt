@@ -32,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -42,6 +43,7 @@ import com.easyesuite.app.di.AppContainer
 import com.easyesuite.app.ui.Routes
 import com.easyesuite.app.ui.common.ErrorBox
 import com.easyesuite.app.ui.common.KeyValueRow
+import com.easyesuite.app.ui.common.StatusChip
 import com.easyesuite.app.ui.common.Load
 import com.easyesuite.app.ui.common.LoadingBox
 import com.easyesuite.app.ui.common.SectionTitle
@@ -52,7 +54,7 @@ import com.easyesuite.app.ui.theme.Green
 import com.easyesuite.core.ItemTypes
 import com.easyesuite.core.Marketplaces
 import com.easyesuite.core.model.ItemDetail
-import com.easyesuite.core.model.ItemHistoryEntry
+import com.easyesuite.core.model.ItemHistoryRow
 import com.easyesuite.core.model.WarehouseStock
 import com.easyesuite.core.util.DateText
 import kotlinx.coroutines.async
@@ -63,8 +65,9 @@ data class ItemDetailUi(
     val item: ItemDetail,
     val stock: List<WarehouseStock>,
     val stockError: String? = null,
-    /** null while loading; empty when the item has no movements. */
-    val history: List<ItemHistoryEntry>? = null,
+    /** null while loading; empty when the item has no audit entries. First page only (newest first). */
+    val history: List<ItemHistoryRow>? = null,
+    val historyTotal: Int = 0,
     val historyError: String? = null,
 )
 
@@ -95,8 +98,13 @@ class ItemDetailViewModel(private val graph: AppContainer.Graph, private val id:
     private suspend fun loadHistory(type: String?) {
         val result = runCatching { graph.items.history(id, type) }
         val current = state.value as? Load.Ready<ItemDetailUi> ?: return
+        val page = result.getOrNull()
         state.value = Load.Ready(
-            current.value.copy(history = result.getOrDefault(emptyList()), historyError = result.exceptionOrNull()?.userMessage()),
+            current.value.copy(
+                history = page?.results?.flatMap { it.rows } ?: emptyList(),
+                historyTotal = page?.count ?: 0,
+                historyError = result.exceptionOrNull()?.userMessage(),
+            ),
         )
     }
 }
@@ -193,28 +201,47 @@ private fun ItemDetailBody(ui: ItemDetailUi, modifier: Modifier, nav: NavHostCon
         SectionTitle("History")
         when {
             ui.historyError != null -> Text(ui.historyError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            ui.history == null -> Text("Loading movements…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-            ui.history.isEmpty() -> Text("No stock movements recorded.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-            else -> ui.history.take(50).forEach { HistoryRow(it) }
+            ui.history == null -> Text("Loading history…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            ui.history.isEmpty() -> Text("No changes recorded.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            else -> {
+                ui.history.forEach { HistoryRow(it) }
+                if (ui.historyTotal > 25) {
+                    Text("Showing the latest 25 of ${ui.historyTotal} changes — the full audit log is on the web.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                }
+            }
         }
         Spacer(Modifier.height(32.dp))
     }
 }
 
+/** Action · Field · Old value → New value · User · Date — the web app's history table, one row per changed field. */
 @Composable
-private fun HistoryRow(entry: ItemHistoryEntry) {
-    val delta = entry.delta
-    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(entry.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            val meta = listOfNotNull(entry.timestamp?.let { DateText.short(it) }, entry.detail.takeIf { it.isNotBlank() }).joinToString(" · ")
-            if (meta.isNotBlank()) Text(meta, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline, maxLines = 2, overflow = TextOverflow.Ellipsis)
+private fun HistoryRow(row: ItemHistoryRow) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusChip(
+                status = when (row.action.lowercase()) { "delete" -> "void"; "create" -> "completed"; else -> "open" },
+                label = row.action,
+            )
+            if (row.field != null) {
+                Spacer(Modifier.width(8.dp))
+                Text(row.fieldLabel, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+            Text(DateText.relative(row.timestamp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
         }
-        if (delta != null) {
-            val whole = delta == Math.floor(delta)
-            val text = (if (delta > 0) "+" else "") + (if (whole) "%d".format(delta.toLong()) else "%.2f".format(delta))
-            Text(text, style = MaterialTheme.typography.titleSmall, color = if (delta < 0) Amber else if (delta > 0) Green else MaterialTheme.colorScheme.outline)
+        if (row.field != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    row.oldValue ?: "—", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                    textDecoration = if (row.oldValue != null) TextDecoration.LineThrough else null, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
+                Text("  →  ", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                Text(row.newValue ?: "—", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }
+        Text(row.actor, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
     }
 }
 

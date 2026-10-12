@@ -41,23 +41,26 @@ app/src/main/kotlin/com/easyesuite/app/
   ui/scan/             CameraX + ML Kit scanner, scan-result router (item / shipment / order / create item)
 ```
 
-## Sign-in configuration
+## Sign-in and environment configuration
 
-The backend expects `Authorization: Bearer <firebase_id_token>` (sign in with Firebase / Identity Platform against the
-workspace's Firebase tenant id). Two strategies are built in — see `../docs/API_MAP.md` → Auth:
+Sign-in is the backend's three-step flow (`../docs/API_MAP.md` → Auth): `POST api/v1/auth/login/tenants/` lists the
+user's workspaces, the chosen workspace is logged into at `clients/{schema_name}/api/v1/auth/login/`, and the
+`firebase_custom_token` from that response is exchanged for a Firebase ID token that only the Firestore-backed
+screens use (Copilot history, notifications, connector status). `app/build.gradle.kts` turns these into `BuildConfig`
+fields, read from an untracked `android/easyesuite.properties` (copy `easyesuite.properties.example`), else a Gradle
+property, else an environment variable:
 
-| Build setting | Effect |
+| Property / env var | Effect |
 |---|---|
-| `-Peasyesuite.firebaseApiKey=…` or `EASYESUITE_FIREBASE_API_KEY` | Firebase web API key → sign in against Identity Platform directly (`auth/FirebaseAuth.kt`) |
-| `-Peasyesuite.firebaseTenantId=…` or `EASYESUITE_FIREBASE_TENANT_ID` | Identity Platform tenant id for a single-tenant build (otherwise resolved per company via `TenantDirectory`, an ASSUMED endpoint) |
-| *(nothing)* | Backend-proxied `auth/login/` + `auth/token/refresh/` flow |
+| `easyesuite.apiRoot` / `EASYESUITE_API_ROOT` | API host; empty = production `api-new.easyesuite.com` |
+| `easyesuite.firebaseApiKey` + `easyesuite.firebaseProjectId` / `EASYESUITE_FIREBASE_API_KEY` + `EASYESUITE_FIREBASE_PROJECT_ID` | Firebase project of the **same** environment; empty = Firestore screens unavailable (REST still works) |
+| `easyesuite.firestoreConnectorDb`, `easyesuite.firestoreNotificationsDb` / `EASYESUITE_FIRESTORE_*_DB` | the two named Firestore databases |
 
-Access tokens are renewed ~60 s before `access_expiration` (Firebase ID tokens live an hour) and once more on a 401.
+Never commit the values — the repository is public. Settings shows the environment name; non-production builds also
+print it on the login screen. Tokens live in `EncryptedSharedPreferences`; OkHttp logging is `BASIC` (no headers/bodies).
 
 ## First run checklist
 
-1. Sign in with your **email and password**, then pick the workspace (e.g. `nationwide`) — the same flow as erp.easyesuite.com. With one workspace the picker is skipped; "Switch workspace" lives in Settings.
-2. If login fails with a 404 → the login path differs; fix `Endpoints.LOGIN` in `ApiConfig.kt`.
-   If it returns 200 but the app says "no access token" → map the field names in `auth/Session.kt` → `TokenResponse`.
-   If the team confirms Firebase sign-in, set the two build settings above instead.
-3. Everything marked **ASSUMED** in `../docs/API_MAP.md` should be confirmed against the web app's DevTools once; each lives in exactly one request class.
+1. Sign in with your **email and password**, then pick the workspace — the same flow as erp.easyesuite.com. With one workspace the picker is skipped; "Switch workspace" (Settings) asks for the password again because the backend's login is per workspace.
+2. "Live data: Connected" in Settings means the Firebase custom-token sign-in worked for this workspace.
+3. Everything still marked **ASSUMED** in `../docs/API_MAP.md` (the MFA body and the write bodies) should be confirmed once; each lives in exactly one request class.

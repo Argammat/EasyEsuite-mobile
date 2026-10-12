@@ -22,7 +22,7 @@ struct RootView: View {
     @EnvironmentObject private var container: AppContainer
 
     var body: some View {
-        if let session = container.session {
+        if let session = container.session, !container.switchingWorkspace {
             MainTabs(graph: container.require())
                 .id(session.tenant)   // rebuild all view models when the tenant changes
         } else {

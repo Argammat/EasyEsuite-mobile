@@ -1,10 +1,12 @@
 import SwiftUI
 import EasyEsuiteKit
 
-/// Sign-in like the web app: email + password, then choose the workspace (company).
+/// Sign-in as the backend specifies it: email + password list the user's workspaces (no token yet), the chosen
+/// workspace is then logged into with the same credentials. The password lives only in this model, in memory,
+/// until the login succeeds.
 @MainActor
 final class LoginModel: ObservableObject {
-    enum Step { case credentials, secondFactor, workspace }
+    enum Step { case credentials, workspace, secondFactor, passwordReset }
 
     @Published var step: Step = .credentials
     @Published var email = ""
@@ -13,45 +15,68 @@ final class LoginModel: ObservableObject {
     @Published var busy = false
     @Published var error: String?
     @Published var message: String?
-    /// Tokens waiting for a workspace.
-    @Published var pending: Session?
-    @Published var workspaces: [TenantInfo] = []
+    @Published var workspaces: [Workspace] = []
     @Published var selectedTenant: String?
-    /// Typed slug when the backend returned no workspace list.
-    @Published var manualTenant = ""
     @Published var switching = false
     private var challengeToken: String?
+    private var pendingSession: Session?
 
     var canSubmit: Bool { !busy && email.contains("@") && password.count >= 4 }
-    var chosenTenant: String? {
-        let t = selectedTenant ?? manualTenant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return t.isEmpty ? nil : t
-    }
+    var selectedWorkspace: Workspace? { workspaces.first { $0.schemaName == selectedTenant } }
 
     func prepare(container: AppContainer) {
         if email.isEmpty { email = container.tokenStore.lastEmail ?? "" }
-        // "Switch workspace" from Settings: tokens are still valid, go straight to the picker.
-        if let pending = container.pendingSwitch, step == .credentials {
-            openPicker(pending, workspaces: [], switching: true, container: container)
-        }
+        switching = container.switchingWorkspace
+        if switching { message = "Enter your password to choose another workspace." }
     }
 
+    /// Step 1: list the workspaces. One workspace → straight to step 2.
     func submit(container: AppContainer) {
         guard canSubmit else { return }
         busy = true; error = nil
-        let graph = container.makeGraph()   // no tenant yet: global sign-in
         Task {
-            do { handle(try await graph.auth.login(email: email, password: password), container: container) }
-            catch { busy = false; self.error = friendly(error) }
+            do {
+                let list = try await container.makeGraph().auth.workspaces(email: email, password: password)
+                workspaces = list
+                let current = container.session?.tenant
+                let last = container.tokenStore.lastTenant
+                let preferred: Workspace?
+                if switching {
+                    preferred = list.first(where: { $0.schemaName != current })
+                } else {
+                    preferred = list.first(where: { $0.schemaName == last }) ?? list.first
+                }
+                selectedTenant = preferred?.schemaName ?? list.first?.schemaName
+                if list.count == 1, !switching, let only = list.first {
+                    await login(tenant: only.schemaName, container: container)
+                } else if list.isEmpty {
+                    busy = false; error = "Your account has no workspace yet. Ask an administrator to add you to a company."
+                } else {
+                    busy = false; step = .workspace
+                }
+            } catch { busy = false; self.error = friendly(error) }
         }
     }
 
-    func submitCode(container: AppContainer) {
-        guard code.count >= 4, !busy else { return }
+    /// Step 2: log in to the chosen workspace.
+    func continueToWorkspace(container: AppContainer) {
+        guard let tenant = selectedTenant, !busy else { return }
         busy = true; error = nil
-        let graph = container.makeGraph()
+        Task { await login(tenant: tenant, container: container) }
+    }
+
+    private func login(tenant: String, container: AppContainer) async {
+        let graph = container.makeGraph(tenant: tenant)
+        do { handle(try await graph.auth.login(email: email, password: password), container: container) }
+        catch { busy = false; self.error = friendly(error) }
+    }
+
+    func submitCode(container: AppContainer) {
+        guard code.count >= 4, !busy, let tenant = selectedTenant else { return }
+        busy = true; error = nil
+        let graph = container.makeGraph(tenant: tenant)
         Task {
-            do { handle(try await graph.auth.completeSecondFactor(email: email, challengeToken: challengeToken, code: code), container: container) }
+            do { handle(try await graph.auth.completeSecondFactor(email: email, challengeToken: challengeToken, pending: pendingSession, code: code), container: container) }
             catch { busy = false; self.error = friendly(error) }
         }
     }
@@ -59,44 +84,21 @@ final class LoginModel: ObservableObject {
     private func handle(_ result: LoginResult, container: AppContainer) {
         switch result {
         case .success(let session):
+            password = ""; code = ""; pendingSession = nil; challengeToken = nil; busy = false
             container.signedIn(session)
-        case .secondFactorRequired(let token, let msg):
-            challengeToken = token; step = .secondFactor; message = msg ?? "Enter the code from your authenticator app."; busy = false
-        case .workspaceRequired(let pending, let workspaces):
-            openPicker(pending, workspaces: workspaces, switching: false, container: container)
+        case .secondFactorRequired(let pending, let token, let msg):
+            pendingSession = pending; challengeToken = token
+            message = msg ?? "Enter the code from your authenticator app."
+            step = .secondFactor; busy = false
+        case .passwordResetRequired:
+            password = ""; step = .passwordReset; busy = false
         }
-    }
-
-    private func openPicker(_ pending: Session, workspaces: [TenantInfo], switching: Bool, container: AppContainer) {
-        let last = container.tokenStore.lastTenant
-        self.pending = pending
-        self.workspaces = workspaces
-        self.switching = switching
-        selectedTenant = workspaces.first { $0.slug == last }?.slug ?? workspaces.first?.slug
-        step = .workspace
-        busy = workspaces.isEmpty && switching
-        if workspaces.isEmpty && switching {
-            // Still inside the previous workspace: its graph tries the global list and the tenant-scoped (verified) one.
-            let graph = container.makeGraph(tenant: last ?? "")
-            Task {
-                let list = (try? await graph.auth.workspaces()) ?? []
-                self.workspaces = list
-                selectedTenant = list.first { $0.slug == last }?.slug ?? list.first?.slug
-                busy = false
-            }
-        }
-    }
-
-    func continueToWorkspace(container: AppContainer) {
-        guard let pending, let tenant = chosenTenant else { return }
-        let session = container.makeGraph().auth.selectWorkspace(pending, tenant: tenant)
-        container.signedIn(session)
     }
 
     func back(container: AppContainer) {
-        if step == .workspace, switching { container.cancelWorkspaceSwitch(); return }
-        container.makeGraph().auth.logout()
-        step = .credentials; code = ""; challengeToken = nil; pending = nil; workspaces = []; selectedTenant = nil; manualTenant = ""; error = nil; busy = false
+        if switching, step == .credentials { container.cancelWorkspaceSwitch(); return }
+        step = .credentials; code = ""; challengeToken = nil; pendingSession = nil; error = nil; busy = false
+        if !switching { message = nil }
     }
 
     private func friendly(_ e: Error) -> String {
@@ -118,12 +120,14 @@ struct LoginView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     switch model.step {
                     case .credentials: credentials
-                    case .secondFactor: secondFactor
                     case .workspace: workspacePicker
+                    case .secondFactor: secondFactor
+                    case .passwordReset: passwordReset
                     }
                     if let err = model.error { Text(err).foregroundStyle(.red).font(.subheadline) }
                 }
                 .padding(24)
+                environmentFooter
             }
         }
         .background(Brand.page)
@@ -145,8 +149,8 @@ struct LoginView: View {
     }
 
     @ViewBuilder private var credentials: some View {
-        Text("Log in").font(.title2.weight(.medium)).foregroundStyle(Brand.ink)
-        Text("Welcome back — sign in to continue.").font(.subheadline).foregroundStyle(.secondary)
+        Text(model.switching ? "Switch workspace" : "Log in").font(.title2.weight(.medium)).foregroundStyle(Brand.ink)
+        Text(model.message ?? "Welcome back — sign in to continue.").font(.subheadline).foregroundStyle(.secondary)
         field("Email", text: $model.email).keyboardType(.emailAddress).textInputAutocapitalization(.never).autocorrectionDisabled().textContentType(.username)
         HStack {
             Group {
@@ -157,11 +161,28 @@ struct LoginView: View {
         .padding(12).background(Brand.field).clipShape(RoundedRectangle(cornerRadius: 14))
 
         Button { model.submit(container: container) } label: {
-            if model.busy { ProgressView().tint(.white).frame(maxWidth: .infinity) } else { Text("Log in").frame(maxWidth: .infinity) }
+            if model.busy { ProgressView().tint(.white).frame(maxWidth: .infinity) } else { Text(model.switching ? "Continue" : "Log in").frame(maxWidth: .infinity) }
         }
         .buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canSubmit)
-        Text("After signing in you choose which company to work in — the same workspaces you see on erp.easyesuite.com.")
-            .font(.caption).foregroundStyle(.secondary)
+        if model.switching {
+            Button("Cancel") { model.back(container: container) }.frame(maxWidth: .infinity)
+        } else {
+            Text("After signing in you choose which company to work in — the same workspaces you see on erp.easyesuite.com.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var workspacePicker: some View {
+        Text("Choose your workspace").font(.title2.weight(.medium)).foregroundStyle(Brand.ink)
+        Text("Workspaces for \(model.email). You can switch any time from Settings.").font(.subheadline).foregroundStyle(.secondary)
+        ForEach(model.workspaces) { w in
+            WorkspaceRow(workspace: w, selected: w.schemaName == model.selectedTenant, current: w.schemaName == container.session?.tenant) { model.selectedTenant = w.schemaName }
+        }
+        Button { model.continueToWorkspace(container: container) } label: {
+            if model.busy { ProgressView().tint(.white).frame(maxWidth: .infinity) } else { Text(model.selectedWorkspace.map { "Continue to \($0.name)" } ?? "Continue").frame(maxWidth: .infinity) }
+        }
+        .buttonStyle(.borderedProminent).controlSize(.large).disabled(model.selectedTenant == nil || model.busy)
+        Button(model.switching ? "Cancel" : "Use a different account") { model.back(container: container) }.frame(maxWidth: .infinity)
     }
 
     @ViewBuilder private var secondFactor: some View {
@@ -173,24 +194,20 @@ struct LoginView: View {
         Button("Back") { model.back(container: container) }
     }
 
-    @ViewBuilder private var workspacePicker: some View {
-        Text("Choose your workspace").font(.title2.weight(.medium)).foregroundStyle(Brand.ink)
-        Text("Signed in as \(model.pending?.email ?? model.email). You can switch workspaces any time from Settings.").font(.subheadline).foregroundStyle(.secondary)
-        if model.busy && model.workspaces.isEmpty {
-            HStack { ProgressView(); Text("Loading your workspaces…").font(.subheadline) }
-        } else if model.workspaces.isEmpty {
-            Text("We couldn't list your workspaces — enter the company name you use on the web.").font(.caption).foregroundStyle(.secondary)
-            field("Company (workspace)", text: $model.manualTenant).textInputAutocapitalization(.never).autocorrectionDisabled()
-        } else {
-            ForEach(model.workspaces) { w in
-                WorkspaceRow(workspace: w, selected: w.slug == model.selectedTenant) { model.selectedTenant = w.slug }
-            }
+    @ViewBuilder private var passwordReset: some View {
+        Text("Password reset required").font(.title2.weight(.medium)).foregroundStyle(Brand.ink)
+        Text("Your administrator requires a new password before you can continue. Reset it on the web, then sign in here again.")
+            .font(.subheadline).foregroundStyle(.secondary)
+        Link(destination: URL(string: "https://erp.easyesuite.com/login")!) { Text("Reset on erp.easyesuite.com").frame(maxWidth: .infinity) }
+            .buttonStyle(.borderedProminent).controlSize(.large)
+        Button("Back to sign in") { model.back(container: container) }.frame(maxWidth: .infinity)
+    }
+
+    /// Non-production builds say which backend they talk to (the team's rule: those builds stay internal).
+    @ViewBuilder private var environmentFooter: some View {
+        if AppConfig.environmentName != "Production" {
+            Text("\(AppConfig.environmentName) backend · \(AppConfig.apiRoot.host ?? "")").font(.caption2).foregroundStyle(.secondary).padding(.bottom, 16)
         }
-        Button { model.continueToWorkspace(container: container) } label: {
-            Text(model.chosenTenant.map { "Continue to \($0)" } ?? "Continue").frame(maxWidth: .infinity)
-        }
-        .buttonStyle(.borderedProminent).controlSize(.large).disabled(model.chosenTenant == nil || model.busy)
-        Button(model.switching ? "Cancel" : "Use a different account") { model.back(container: container) }.frame(maxWidth: .infinity)
     }
 
     private func field(_ title: String, text: Binding<String>) -> some View {
@@ -199,19 +216,17 @@ struct LoginView: View {
 }
 
 private struct WorkspaceRow: View {
-    let workspace: TenantInfo
+    let workspace: Workspace
     let selected: Bool
+    var current = false
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             HStack(spacing: 14) {
-                Text(workspace.slug.prefix(2).uppercased()).font(.caption.weight(.bold)).foregroundStyle(Brand.greenText)
-                    .frame(width: 40, height: 40).background(Brand.greenTint).clipShape(RoundedRectangle(cornerRadius: 12))
+                avatar
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(workspace.slug).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                    if !workspace.name.isEmpty, workspace.name.caseInsensitiveCompare(workspace.slug) != .orderedSame {
-                        Text(workspace.name).font(.caption).foregroundStyle(.secondary)
-                    }
+                    Text(workspace.name).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+                    Text(current ? "\(workspace.schemaName) · current" : workspace.schemaName).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 if selected { Image(systemName: "checkmark").foregroundStyle(Brand.greenText).fontWeight(.bold) }
@@ -223,4 +238,16 @@ private struct WorkspaceRow: View {
         }
         .buttonStyle(.plain)
     }
+
+    @ViewBuilder private var avatar: some View {
+        if let url = workspace.logoUrl.flatMap(URL.init(string:)) {
+            AsyncImage(url: url) { phase in
+                if let img = phase.image { img.resizable().scaledToFit().padding(6) } else { monogram }
+            }
+            .frame(width: 40, height: 40).background(Brand.greenTint).clipShape(RoundedRectangle(cornerRadius: 12))
+        } else {
+            monogram.frame(width: 40, height: 40).background(Brand.greenTint).clipShape(RoundedRectangle(cornerRadius: 12))
+        }
+    }
+    private var monogram: some View { Text(workspace.monogram).font(.caption.weight(.bold)).foregroundStyle(Brand.greenText) }
 }

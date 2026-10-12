@@ -266,35 +266,104 @@ public struct CreateItemRequest: Encodable, Sendable {
     public init(name: String) { self.name = name }
 }
 
-/// One row of `items/{type}/{id}/history/` — shape not captured yet, so every field is optional.
-public struct ItemHistoryEntry: Decodable, Hashable, Sendable {
+/// One audit entry of `items/{inventory_items|kit_package_items|variant_items}/{id}/history/` (VERIFIED shape,
+/// backend answers 2026-10-09). The endpoint is paginated like every other list; `changes` maps a field name to
+/// `[old, new]`. Unknown keys (request IP and other audit fields) are ignored.
+public struct ItemAuditEntry: Decodable, Hashable, Sendable, Identifiable {
     public var id: Int64?
-    public var date: String?
-    public var createdDate: String?
-    public var type: String?
-    public var transactionType: String?
+    /// `create` / `update` / `delete` / `access` (lowercase strings; the filter takes integers 0–3).
     public var action: String?
-    public var quantity: Double?
-    public var quantityChange: Double?
-    public var warehouse: String?
-    public var warehouseName: String?
-    public var reference: String?
-    public var number: String?
-    public var memo: String?
-    public var description: String?
-    public var addedBy: String?
-    public var user: String?
+    /// Who made the change; nil for system or automated changes.
+    public var actor: String?
+    /// ISO-8601, UTC.
+    public var timestamp: String?
+    public var contentType: String?
+    public var changes: [String: JSONValue]?
 
-    public var timestamp: String? { date ?? createdDate }
-    public var label: String {
-        let raw = transactionType ?? type ?? action ?? "Movement"
-        let spaced = raw.replacingOccurrences(of: "_", with: " ")
+    private enum CodingKeys: String, CodingKey { case id, action, actor, timestamp, contentType, changes }
+    public init(id: Int64? = nil, action: String? = nil, actor: String? = nil, timestamp: String? = nil, contentType: String? = nil, changes: [String: JSONValue]? = nil) {
+        self.id = id; self.action = action; self.actor = actor; self.timestamp = timestamp; self.contentType = contentType; self.changes = changes
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try? c.decodeIfPresent(Int64.self, forKey: .id)
+        action = try? c.decodeIfPresent(String.self, forKey: .action)
+        actor = try? c.decodeIfPresent(String.self, forKey: .actor)
+        timestamp = try? c.decodeIfPresent(String.self, forKey: .timestamp)
+        contentType = try? c.decodeIfPresent(String.self, forKey: .contentType)
+        changes = try? c.decodeIfPresent([String: JSONValue].self, forKey: .changes)
+    }
+
+    public var actionLabel: String { (action ?? "change").prefix(1).uppercased() + (action ?? "change").dropFirst() }
+    public var actorLabel: String { actor?.nilIfBlank ?? "System" }
+
+    /// The web app shows one table row per changed field: Action · Field · Old value · New value · User · Date.
+    public var rows: [ItemHistoryRow] {
+        guard let changes, !changes.isEmpty else {
+            return [ItemHistoryRow(id: "\(id ?? 0)", entryId: id, action: actionLabel, field: nil, oldValue: nil, newValue: nil, actor: actorLabel, timestamp: timestamp)]
+        }
+        return changes.keys.sorted().map { key in
+            let pair = changes[key]?.arrayValue ?? []
+            return ItemHistoryRow(id: "\(id ?? 0):\(key)", entryId: id, action: actionLabel, field: key,
+                                  oldValue: pair.indices.contains(0) ? ItemHistoryRow.text(pair[0]) : nil,
+                                  newValue: pair.indices.contains(1) ? ItemHistoryRow.text(pair[1]) : ItemHistoryRow.text(changes[key]),
+                                  actor: actorLabel, timestamp: timestamp)
+        }
+    }
+}
+
+/// A flattened audit row (one changed field).
+public struct ItemHistoryRow: Hashable, Sendable, Identifiable {
+    public var id: String
+    public var entryId: Int64?
+    public var action: String
+    public var field: String?
+    public var oldValue: String?
+    public var newValue: String?
+    public var actor: String
+    public var timestamp: String?
+
+    /// `sale_price` → "Sale price".
+    public var fieldLabel: String {
+        guard let field else { return "" }
+        let spaced = field.replacingOccurrences(of: "_", with: " ")
         return spaced.prefix(1).uppercased() + spaced.dropFirst()
     }
-    public var delta: Double? { quantityChange ?? quantity }
-    public var detail: String {
-        [warehouseName ?? warehouse, reference ?? number, memo ?? description, addedBy ?? user]
-            .compactMap { $0?.nilIfBlank }.joined(separator: " · ")
+
+    /// Values are usually strings or null; nested JSON is shown as compact text.
+    public static func text(_ v: JSONValue?) -> String? {
+        guard let v else { return nil }
+        switch v {
+        case .null: return nil
+        case .string(let s): return s
+        case .number, .bool: return v.stringValue
+        case .array, .object:
+            let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys]
+            return (try? enc.encode(v)).flatMap { String(data: $0, encoding: .utf8) }
+        }
+    }
+}
+
+/// Query parameters of the history endpoint (all optional).
+public struct HistoryFilter: Equatable, Sendable {
+    /// 0 = create, 1 = update, 2 = delete, 3 = access.
+    public var action: Int?
+    public var field: String?
+    /// A user id.
+    public var actor: Int?
+    public var search: String?
+    public var startDate: String?
+    public var endDate: String?
+    /// `asc` or `desc` by timestamp.
+    public var sortBy: String? = "desc"
+
+    public init(action: Int? = nil, field: String? = nil, actor: Int? = nil, search: String? = nil, startDate: String? = nil, endDate: String? = nil, sortBy: String? = "desc") {
+        self.action = action; self.field = field; self.actor = actor; self.search = search; self.startDate = startDate; self.endDate = endDate; self.sortBy = sortBy
+    }
+
+    public var query: [String: Any?] {
+        ["action": action, "field": field?.nilIfBlank, "actor": actor, "search_history": search?.nilIfBlank,
+         "start_date_history": startDate, "end_date_history": endDate, "sort_by": sortBy]
     }
 }
 

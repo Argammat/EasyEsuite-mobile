@@ -4,6 +4,10 @@ import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -279,32 +283,84 @@ data class CreateItemRequest(
     }
 }
 
-/** One row of `items/{type}/{id}/history/` — shape not captured yet, so every field is optional. */
+/**
+ * One audit entry of `items/{inventory_items|kit_package_items|variant_items}/{id}/history/` (VERIFIED shape,
+ * backend answers 2026-10-09). The endpoint is paginated like every other list; `changes` maps a field name to
+ * `[old, new]`. Unknown keys (request IP and other audit fields) are ignored.
+ */
 @Serializable
-data class ItemHistoryEntry(
+data class ItemAuditEntry(
     val id: Long? = null,
-    val date: String? = null,
-    @SerialName("created_date") val createdDate: String? = null,
-    val type: String? = null,
-    @SerialName("transaction_type") val transactionType: String? = null,
+    /** `create` / `update` / `delete` / `access` (lowercase strings; the filter takes integers 0–3). */
     val action: String? = null,
-    val quantity: Double? = null,
-    @SerialName("quantity_change") val quantityChange: Double? = null,
-    val warehouse: String? = null,
-    @SerialName("warehouse_name") val warehouseName: String? = null,
-    val reference: String? = null,
-    val number: String? = null,
-    val memo: String? = null,
-    val description: String? = null,
-    @SerialName("added_by") val addedBy: String? = null,
-    val user: String? = null,
+    /** Who made the change; null for system or automated changes. */
+    val actor: String? = null,
+    /** ISO-8601, UTC. */
+    val timestamp: String? = null,
+    @SerialName("content_type") val contentType: String? = null,
+    val changes: JsonObject? = null,
 ) {
-    val timestamp: String? get() = date ?: createdDate
-    val label: String get() = (transactionType ?: type ?: action ?: "Movement").replace('_', ' ').replaceFirstChar { it.uppercase() }
-    val delta: Double? get() = quantityChange ?: quantity
-    val detail: String
-        get() = listOfNotNull(warehouseName ?: warehouse, reference ?: number, memo ?: description, addedBy ?: user)
-            .filter { it.isNotBlank() }.joinToString(" · ")
+    val actionLabel: String get() = (action ?: "change").replaceFirstChar { it.uppercase() }
+    val actorLabel: String get() = actor?.takeIf { it.isNotBlank() } ?: "System"
+
+    /** The web app shows one table row per changed field: Action · Field · Old value · New value · User · Date. */
+    val rows: List<ItemHistoryRow>
+        get() {
+            val c = changes
+            if (c.isNullOrEmpty()) return listOf(ItemHistoryRow("${id ?: 0}", id, actionLabel, null, null, null, actorLabel, timestamp))
+            return c.keys.sorted().map { key ->
+                val pair = c[key] as? JsonArray
+                ItemHistoryRow(
+                    id = "${id ?: 0}:$key", entryId = id, action = actionLabel, field = key,
+                    oldValue = pair?.getOrNull(0)?.let { ItemHistoryRow.text(it) },
+                    newValue = pair?.getOrNull(1)?.let { ItemHistoryRow.text(it) } ?: if (pair == null) ItemHistoryRow.text(c[key]) else null,
+                    actor = actorLabel, timestamp = timestamp,
+                )
+            }
+        }
+}
+
+/** A flattened audit row (one changed field). */
+data class ItemHistoryRow(
+    val id: String,
+    val entryId: Long?,
+    val action: String,
+    val field: String?,
+    val oldValue: String?,
+    val newValue: String?,
+    val actor: String,
+    val timestamp: String?,
+) {
+    /** `sale_price` → "Sale price". */
+    val fieldLabel: String get() = field?.replace('_', ' ')?.replaceFirstChar { it.uppercase() }.orEmpty()
+
+    companion object {
+        /** Values are usually strings or null; nested JSON is shown as compact text. */
+        fun text(v: JsonElement?): String? = when (v) {
+            null, is JsonNull -> null
+            is JsonPrimitive -> v.contentOrNull
+            else -> v.toString()
+        }
+    }
+}
+
+/** Query parameters of the history endpoint (all optional). */
+data class HistoryFilter(
+    /** 0 = create, 1 = update, 2 = delete, 3 = access. */
+    val action: Int? = null,
+    val field: String? = null,
+    /** A user id. */
+    val actor: Int? = null,
+    val search: String? = null,
+    val startDate: String? = null,
+    val endDate: String? = null,
+    /** `asc` or `desc` by timestamp. */
+    val sortBy: String? = "desc",
+) {
+    fun asMap(): Map<String, Any?> = mapOf(
+        "action" to action, "field" to field?.takeIf { it.isNotBlank() }, "actor" to actor, "search_history" to search?.takeIf { it.isNotBlank() },
+        "start_date_history" to startDate, "end_date_history" to endDate, "sort_by" to sortBy,
+    )
 }
 
 /** Body for `POST items/warehouse_inventory_items/` (initial stocking). ASSUMED. */

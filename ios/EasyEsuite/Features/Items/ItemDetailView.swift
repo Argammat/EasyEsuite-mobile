@@ -5,8 +5,9 @@ struct ItemDetailData {
     var item: ItemDetail
     var stock: [WarehouseStock]
     var stockError: String?
-    /// nil while loading; empty when the item has no movements.
-    var history: [ItemHistoryEntry]?
+    /// nil while loading; empty when the item has no audit entries. First page only (newest first).
+    var history: [ItemHistoryRow]?
+    var historyTotal = 0
     var historyError: String?
 }
 
@@ -36,11 +37,17 @@ final class ItemDetailModel: ObservableObject {
     }
 
     private func loadHistory(type: String?) async {
-        var history: [ItemHistoryEntry] = []
+        var rows: [ItemHistoryRow] = []
+        var total = 0
         var historyError: String?
-        do { history = try await graph.items.history(id, type: type) } catch { historyError = error.userMessage }
+        do {
+            let page = try await graph.items.history(id, type: type)
+            rows = page.results.flatMap(\.rows)
+            total = page.count
+        } catch { historyError = error.userMessage }
         guard var data = state.value else { return }
-        data.history = history
+        data.history = rows
+        data.historyTotal = total
         data.historyError = historyError
         state = .ready(data)
     }
@@ -124,10 +131,13 @@ struct ItemDetailView: View {
                 if let e = data.historyError {
                     Text(e).foregroundStyle(.red).font(.caption)
                 } else if let history = data.history {
-                    if history.isEmpty { Text("No stock movements recorded.").font(.caption).foregroundStyle(.secondary) }
-                    ForEach(Array(history.prefix(50).enumerated()), id: \.offset) { _, entry in HistoryRow(entry: entry) }
+                    if history.isEmpty { Text("No changes recorded.").font(.caption).foregroundStyle(.secondary) }
+                    ForEach(history) { row in HistoryRow(row: row) }
+                    if data.historyTotal > 25 {
+                        Text("Showing the latest 25 of \(fmtCount(data.historyTotal)) changes — the full audit log is on the web.").font(.caption2).foregroundStyle(.secondary)
+                    }
                 } else {
-                    Text("Loading movements…").font(.caption).foregroundStyle(.secondary)
+                    Text("Loading history…").font(.caption).foregroundStyle(.secondary)
                 }
             }
             .padding()
@@ -136,21 +146,25 @@ struct ItemDetailView: View {
     }
 }
 
+/// Action · Field · Old value → New value · User · Date — the web app's history table, one row per changed field.
 struct HistoryRow: View {
-    let entry: ItemHistoryEntry
+    let row: ItemHistoryRow
     var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.label).font(.subheadline.weight(.medium))
-                let meta = [entry.timestamp.map { DateText.short($0) }, entry.detail.nilIfBlank].compactMap { $0 }.joined(separator: " · ")
-                if !meta.isEmpty { Text(meta).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                StatusChip(status: row.action.lowercased() == "delete" ? "void" : (row.action.lowercased() == "create" ? "completed" : "open"), label: row.action)
+                if let field = row.field { Text(row.fieldLabel).font(.subheadline.weight(.medium)).lineLimit(1).accessibilityLabel(field) }
+                Spacer()
+                Text(DateText.relative(row.timestamp)).font(.caption).foregroundStyle(.secondary)
             }
-            Spacer()
-            if let delta = entry.delta {
-                let whole = delta == delta.rounded()
-                let text = (delta > 0 ? "+" : "") + (whole ? String(Int64(delta)) : String(format: "%.2f", delta))
-                Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(delta < 0 ? Brand.amber : (delta > 0 ? Brand.green : Color.secondary))
+            if row.field != nil {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(row.oldValue ?? "—").font(.caption).foregroundStyle(.secondary).strikethrough(row.oldValue != nil).lineLimit(2)
+                    Image(systemName: "arrow.right").font(.caption2).foregroundStyle(.secondary)
+                    Text(row.newValue ?? "—").font(.caption.weight(.medium)).lineLimit(2)
+                }
             }
+            Text(row.actor).font(.caption2).foregroundStyle(.secondary)
         }
         .padding(.vertical, 4)
     }

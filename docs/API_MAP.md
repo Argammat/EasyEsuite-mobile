@@ -3,20 +3,22 @@
 Both apps code against this file. Every row is marked:
 
 - **VERIFIED** — observed live (MCP call or the web app's own network traffic) on 2026‑10‑03, or confirmed by the
-  backend team's *"EasyeSuite API: Items & Inventory (for the mobile app)"* notes (2026‑10‑07, taken from the web
-  frontend source on `dev`; full spec in their `docs/docs/api/openapi-backend.yaml`).
+  backend team's *"EasyeSuite API: Items & Inventory (for the mobile app)"* notes (2026‑10‑07) and their
+  *"Mobile App — API Integration Answers"* (2026‑10‑09; auth, Firebase, history). Full spec: their `docs/docs/api/openapi-backend.yaml`.
 - **ASSUMED** — conventional / inferred from the web bundle; confirm in DevTools before shipping.
 
 ## Base URLs
 
 | Name | URL | Status |
 |---|---|---|
-| API root | `https://api-new.easyesuite.com/` | VERIFIED (web bundle constant) |
-| Tenant root | `{API root}clients/{tenant}/api/v1/` | VERIFIED (`clients/nationwide/api/v1/...`) |
-| Global root | `{API root}api/v1/` | VERIFIED (exists; used for pre‑login / super‑admin calls) |
+| API root (production) | `https://api-new.easyesuite.com/` | VERIFIED |
+| API root (staging / development) | *not committed* — the backend team's answers doc lists them; builds read `EASYESUITE_API_ROOT` | VERIFIED (team answers 2026‑10‑09) |
+| Tenant root | `{API root}clients/{schema_name}/api/v1/` | VERIFIED |
+| Global root | `{API root}api/v1/` | VERIFIED (only `auth/login/tenants/` is used there) |
 
-`tenant` is the company slug the user types at login (web stores it as `logInCompanyName` / `tenantId`).
-All paths below are relative to the **tenant root** unless noted.
+`schema_name` is the workspace identifier returned by step 1 of sign‑in (below). All paths are relative to the
+**tenant root** unless noted. A build's base URL and Firebase config must come from the **same environment**;
+development and staging builds stay on internal testing tracks.
 
 ## Conventions (VERIFIED)
 
@@ -25,44 +27,48 @@ All paths below are relative to the **tenant root** unless noted.
   Use the order's own `date` filter, **not** `created_date_*` (that is ERP ingestion time and over‑counts).
 - Money comes in three shapes, sometimes on the same record: `"180.00"`, `"$82,765.20"`, `166464`. Decode leniently (see `Money` in both SDKs). Fields suffixed `_new` are plain decimals with a `_new_currency` sibling — prefer those.
 - `status` filters on PO lists are **multi‑valued** (`?status=Open&status=Partial%20Received`).
-- Standard errors: DRF `{ "detail": "..." }` or `{ "field": ["msg"] }` with 400/401/403/404.
+- Standard errors: `{ "errors": {...}, "status_code": n }` (also DRF `{ "detail": "..." }` / `{ "field": ["msg"] }`) with 400/401/403/404; `429` = rate‑limited (back off).
 
-## Auth
+## Auth (VERIFIED — backend team answers, 2026‑10‑09)
 
-**Flow (as on erp.easyesuite.com): email + password first, then pick the workspace.** The web login has no company
-field; after signing in the user chooses from their workspaces (`nationwide`, `AMA invesment Group LLC`, …) and can switch
-later from the account menu. Both SDKs do the same: `AuthService.login(email, password)` authenticates against the
-**global root** (no tenant yet), lists the workspaces, and returns `WorkspaceRequired` (or signs straight in when there is
-exactly one); `selectWorkspace(pending, slug)` stores the tenant-scoped session. A session with a blank tenant is
-"pending" and never counts as signed in.
+**The backend login is the permanent flow.** Every REST call uses the backend JWT. Firebase is a *second, optional*
+sign‑in, done after it with a token the backend provides, used only for the Firestore‑backed screens.
 
-The backend team's notes: **`Authorization: Bearer <firebase_id_token>` — sign in with Firebase / Identity Platform against
-the workspace's own Firebase tenant ID.** The web app also stores `accessToken` / `refreshToken` / `access_expiration` /
-`refresh_expiration` / `firebaseTenantId` and calls `auth/token/refresh/`, so both SDKs implement two strategies behind one
-`AuthService`; a config switch (`ApiConfig.firebase`) picks one. Nothing in the UI knows which is active.
-
-| Call | Method / path | Body → Response | Status |
+| Step | Method / path | Body → Response | Notes |
 |---|---|---|---|
-| Header | `Authorization: Bearer {token}` | the Firebase ID token (Firebase flow) or the backend access token | VERIFIED (backend team) |
-| **Firebase sign‑in** | `POST https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={webApiKey}` | `{email, password, returnSecureToken:true, tenantId}` → `{idToken, refreshToken, expiresIn, localId}` | VERIFIED (Identity Platform REST); **needs the Firebase web API key** (public, ships in the web bundle) |
-| Firebase refresh | `POST https://securetoken.googleapis.com/v1/token?key={webApiKey}` | form `grant_type=refresh_token&refresh_token=…` → `{id_token, refresh_token, expires_in}` | VERIFIED (Identity Platform REST) |
-| Company → Identity tenant id | `GET {global root}clients/clients/?name={slug}` | → `{slug, display_name, firebase_tenant_id}` (parsed leniently) | **ASSUMED** — the web app stores `firebaseTenantId` per company; the endpoint that returns it must be confirmed. Fallback: build‑time `FIREBASE_TENANT_ID`, then project‑level users |
-| Login (backend‑proxied) | `POST {global root}auth/login/` (tenant‑scoped `auth/login/` once inside a workspace) | `{email, password}` → `{access, refresh, user, access_expiration, refresh_expiration}` | **VERIFIED path** (2026‑10‑07: `GET /api/v1/auth/login/` → 405 `Allow: POST, OPTIONS`, DRF view "Pre2Fa Token Obtain" — same view as the tenant‑scoped path). Response body ASSUMED (dj‑rest‑auth keys the web app stores); errors arrive as `{"errors": {...}, "status_code": n}` |
-| Workspaces after login | `GET {global root}users/me/tenants/` (fallback: tenant‑scoped `users/me/tenants/`) | → `[{slug, display_name, …}]` parsed leniently; also read from `user.tenants` in the login response when present | **VERIFIED path** (2026‑10‑07: unauthenticated `GET /api/v1/users/me/tenants/` → 403 `{"errors": {"Not authenticated": …}}`, DRF view "My Tenants List"; tenant‑scoped path identical). Row shape unconfirmed → parsed leniently; empty list → the apps ask for the slug |
-| Login 2FA step | `POST auth/login/2fa/` | `{...challenge from step 1, otp}` → same as login | VERIFIED path, ASSUMED body |
-| Refresh (backend‑proxied) | `POST auth/token/refresh/` | `{refresh}` → `{access, access_expiration}` | VERIFIED path (seen in web traffic), ASSUMED body |
-| MFA options | `GET auth/2fa/mfa_options/`, `GET auth/mfa_settings/` | | VERIFIED paths |
+| 1. Workspaces | `POST {global root}auth/login/tenants/` | `{email, password}` → `[{tenant_id, schema_name, display_name, company_name (deprecated), logo_url, initials, last_active_at}]`, most recently used first | Returns **no token**. One workspace → skip the picker. `401` is the same body for every reason (wrong password, unknown email, locked, inactive) → one generic message. `429` per IP and per email → back off |
+| 2. Login | `POST /clients/{schema_name}/api/v1/auth/login/` | `{email, password}` → `{access (5 min), refresh (1 day), firebase_custom_token? , user: {pk, email, tenant_id, firebase_tenant_id, is_mfa_enabled, is_mfa_mandatory, needs_password_reset, all_role_names[], plan_name}}` | Header from here on: `Authorization: Bearer {access}`. `needs_password_reset` → do not continue (reset on the web). `is_mfa_enabled` / `is_mfa_mandatory` → a one‑time‑code step follows |
+| Refresh | `POST auth/token/refresh/` | `{refresh}` → **new `access` and new `refresh`** | Each refresh token works **once**; store both; only one refresh in flight (queue the rest); failure → login screen. Both SDKs also renew ~60 s before expiry (from `access_expiration` or the JWT `exp` claim) |
+| 3. Firebase | `POST https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key={apiKey}` | `{token: firebase_custom_token, returnSecureToken: true, tenantId: user.firebase_tenant_id}` → `{idToken, refreshToken, expiresIn}` | Only when `firebase_tenant_id` is not null. **Never `signInWithEmailAndPassword`** (Firebase users have no password). Failure is tolerated: REST keeps working, Firestore screens show "unavailable" |
+| Firebase refresh | `POST https://securetoken.googleapis.com/v1/token?key={apiKey}` | form `grant_type=refresh_token&refresh_token=…` → `{id_token, refresh_token, expires_in}` | VERIFIED (Identity Platform REST) |
+| Login 2FA step | `POST auth/login/2fa/` | `{email, ephemeral_token, code}` → same as login | VERIFIED path, **ASSUMED body** — exact MFA exchange still to confirm (question sent to the team) |
 | Me | `GET users/users/me/` | profile (`first_name`, `last_name`, `email`, `image`, `groups[]`, `is_superuser`, `finished_onboarding`) | VERIFIED |
-| My tenants | `GET users/me/tenants/` | list of workspaces the user can switch to | VERIFIED path, shape unconfirmed |
 | Permissions | — | USER role or higher to create/edit items; VIEWER is read‑only | VERIFIED (backend team) |
 
-Token lifecycle (both SDKs): the stored `access_expiration` is checked before every call and the token is renewed
-~60 s early (Firebase ID tokens live one hour); a 401 still triggers one refresh + retry; a failed refresh clears the
-session. Refresh strategy follows `Session.provider` (`firebase` / `backend`).
+Not provided, by design: a company‑name → tenant‑id lookup (would let anyone list customers) and a per‑build tenant id
+(one person can belong to several companies). Switching workspaces therefore re‑runs steps 1–2 with the password; the
+apps never store the password.
 
-> **Two values to obtain from the backend team before the Firebase flow can be switched on:** the Firebase **web API key**
-> (`FIREBASE_API_KEY` / `EASYESUITE_FIREBASE_API_KEY`) and either the company→Identity‑tenant lookup endpoint or a per‑build
-> `FIREBASE_TENANT_ID`. Until then the apps use the backend‑proxied flow, which is what the web app's stored keys suggest.
+### Firebase / Firestore (VERIFIED — backend team answers, 2026‑10‑09)
+
+The web app reads these from Firestore, not from REST: AI Copilot conversations (threads + messages), AI reports /
+trends / news / events calendar, marketplace connector accounts and live sync status (all in the **connector**
+database), and in‑app notifications — list, unread count, read state (**notifications** database). Documents live
+under `tenants/{user.tenant_id}/…` (the **numeric** id, not the Firebase tenant id); notifications under
+`tenants/{tenant_id}/users/{user.pk}/notifications`. Sending a Copilot message stays a REST call.
+
+Per‑environment values (`apiKey`, `projectId`, `appId`, the two named databases — never `(default)`) are in the team's
+answers doc and are **not committed here** (the repository is public): iOS reads them from
+`ios/Config/Environment.local.xcconfig` / CI secrets, Android from `android/easyesuite.properties` / CI secrets.
+Both SDKs ship a read‑only Firestore REST client (`FirestoreClient`) authenticated with the Firebase ID token; the exact
+document paths and sample documents per screen come from the team once we name the first‑release screens.
+
+### Security rules the apps follow (backend team)
+
+Tokens only in Keychain / Keystore; never logged or sent to crash reporters (OkHttp logging is `BASIC` — no headers or
+bodies); HTTPS only; the password is never stored; sign‑out deletes both JWTs and the Firebase tokens; only test accounts
+on dev/staging; non‑production builds stay internal; anything unexpected (leaked token, another company's data) is
+reported immediately so sessions can be revoked.
 
 ## Items & catalog (VERIFIED — backend team notes, 2026‑10‑07)
 
@@ -78,7 +84,7 @@ session. Refresh strategy follows `Session.provider` (`firebase` / `backend`).
 | Item detail — generic fallback | `GET items/items/{id}/` | used when the type is unknown or the typed endpoint 404s | VERIFIED (live) |
 | Stock per warehouse (item page) | `GET items/warehouse_inventory_items/?item={id}&limit=25&offset=0` | rows: `warehouse`, `quantity_on_hand`, `quantity_available`, `quantity_committed`, `quantity_on_order`, `quantity_in_transit`, `reorder_point`, `average_cost` | VERIFIED |
 | Kit inventory tab | `GET items/kit_package_items/{id}/kit_package_item_quantity_in_warehouses/` | | VERIFIED (not used yet) |
-| History tab | `GET items/inventory_items/{id}/history/` (or `kit_package_items` / `variant_items`) | row shape not captured → decoded leniently (`date`/`created_date`, `transaction_type`/`type`, `quantity`/`quantity_change`, `warehouse`, `memo`…) | VERIFIED path, shape ASSUMED |
+| History tab | `GET items/inventory_items/{id}/history/` (`kit_package_items` / `variant_items` by `item_type`) | **paginated** (`limit`/`offset`, 25 per page; the OpenAPI array shape is a doc error) → `results: [{id, action ("create"/"update"/"delete"/"access"), actor (email or null = system), timestamp (UTC), content_type, changes: {field: [old, new]}}]` + other audit fields to ignore. Filters: `action` (**integer** 0–3), `field`, `actor` (user id), `search_history`, `start_date_history`, `end_date_history`, `sort_by` (`asc`/`desc`). The web app shows one row per changed field | VERIFIED (team answers 2026‑10‑09) |
 | Available qty in every warehouse | `GET items/items/{id}/available_quantity_in_warehouses/` | | VERIFIED (not used yet) |
 | **Create inventory item** | `POST items/inventory_items/` | see `CreateItemRequest` and the rules below | VERIFIED |
 | Create kit / variant | `POST items/kit_package_items/`, `POST items/variant_items/` | kit rows accept only `{inventory_item, quantity, tax_schedule}`; the web "Add Item ▾" menu offers Add Item / Add Kit Package / Add Variant Item | VERIFIED (designed in the mobile mockups; not implemented in the apps yet) |
@@ -97,7 +103,7 @@ session. Refresh strategy follows `Session.provider` (`firebase` / `backend`).
 - Send empty optional fields as `null` (or omit them), never `""` — `purchase_price: ""` is a 400.
 - Don't send the spec's read‑only fields (`id`, `created_date`, …).
 - `name` must be unique per item type — duplicate → 400 *"An item with the same name and type already exists"*.
-- `item_type` codes: `INV` verified; `KIT` / `VAR` are the web filter values and still need confirming.
+- `item_type` has exactly three values — `INV` (inventory item), `KIT` (kit/package), `VAR` (variant) — VERIFIED (team answers 2026‑10‑09).
 
 Both `CreateItemRequest` models always emit the seven blocks + `marketplace_pricing: []` and omit nulls (unit‑tested).
 

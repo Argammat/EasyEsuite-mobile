@@ -220,4 +220,47 @@ final class ModelDecodingTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(page.results[1].unAppliedAmountNew).doubleValue, 183.44, accuracy: 0.001)
         XCTAssertTrue(page.results[1].hasUnapplied)
     }
+
+    /// Backend answers 2026-10-09: history is paginated audit entries; the web app shows one row per changed field.
+    func testItemHistoryDecodesAndFlattensToOneRowPerField() throws {
+        let page = try decoder.decode(Page<ItemAuditEntry>.self, from: fixture("item_history"))
+        XCTAssertEqual(page.count, 137)
+        XCTAssertTrue(page.hasMore)
+        XCTAssertEqual(page.results.count, 2)
+        let first = page.results[0]
+        XCTAssertEqual(first.action, "update"); XCTAssertEqual(first.actor, "jane@acme.com"); XCTAssertEqual(first.contentType, "erp | item")
+        let rows = first.rows
+        XCTAssertEqual(rows.map(\.field), ["modified_by", "sale_price"])   // sorted by field name
+        XCTAssertEqual(rows[1].fieldLabel, "Sale price")
+        XCTAssertEqual(rows[1].oldValue, "19.99"); XCTAssertEqual(rows[1].newValue, "17.49")
+        XCTAssertEqual(rows[1].actor, "jane@acme.com"); XCTAssertEqual(rows[1].action, "Update")
+        let created = page.results[1].rows
+        XCTAssertEqual(created.count, 1)
+        XCTAssertEqual(created[0].actor, "System")                       // null actor = automated change
+        XCTAssertNil(created[0].oldValue)
+        XCTAssertEqual(created[0].newValue, #"[{"id":3,"qty":10}]"#)     // nested JSON shown as compact text
+        XCTAssertEqual(HistoryFilter(action: 1, field: "sale_price").query["action"] as? Int, 1)
+        XCTAssertEqual(HistoryFilter().query["sort_by"] as? String, "desc")
+    }
+
+    func testFirestoreTypedValuesDecodeToPlainJSON() throws {
+        let raw = try JSONDecoder().decode(JSONValue.self, from: Data("""
+        {"name":"projects/p/databases/d/documents/tenants/42/threads/t1",
+         "fields":{"title":{"stringValue":"Restock plan"},"messages":{"integerValue":"3"},"unread":{"booleanValue":true},
+                   "score":{"doubleValue":0.5},"gone":{"nullValue":null},"updated":{"timestampValue":"2026-10-08T14:03:11Z"},
+                   "meta":{"mapValue":{"fields":{"model":{"stringValue":"gpt"},"tags":{"arrayValue":{"values":[{"stringValue":"a"},{"integerValue":"2"}]}}}}}},
+         "updateTime":"2026-10-08T14:03:11.5Z"}
+        """.utf8))
+        let doc = try XCTUnwrap(FirestoreValue.document(raw))
+        XCTAssertEqual(doc.id, "t1")
+        XCTAssertEqual(doc["title"]?.stringValue, "Restock plan")
+        XCTAssertEqual(doc["messages"]?.doubleValue, 3)
+        XCTAssertEqual(doc["unread"], .bool(true))
+        XCTAssertEqual(doc["gone"], .null)
+        XCTAssertEqual(doc["updated"]?.stringValue, "2026-10-08T14:03:11Z")
+        XCTAssertEqual(doc["meta"]?["model"]?.stringValue, "gpt")
+        XCTAssertEqual(doc["meta"]?["tags"]?.arrayValue?.count, 2)
+        XCTAssertEqual(doc["meta"]?["tags"]?.arrayValue?[1].doubleValue, 2)
+        XCTAssertEqual(doc.updateTime, "2026-10-08T14:03:11.5Z")
+    }
 }

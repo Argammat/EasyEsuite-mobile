@@ -2,6 +2,7 @@ package com.easyesuite.core.auth
 
 import com.easyesuite.core.FirebaseConfig
 import com.easyesuite.core.net.ApiException
+import com.easyesuite.core.util.DateText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
@@ -17,17 +18,16 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
 import java.time.Instant
-import java.time.format.DateTimeFormatter
 
-/** Tokens minted by Identity Platform. `idToken` is what the API wants as `Authorization: Bearer`. */
+/** Tokens minted by Identity Platform. `idToken` is the Bearer for Firestore; the REST API never sees it. */
 data class FirebaseTokens(val idToken: String, val refreshToken: String, val expiresAt: Instant, val localId: String?) {
-    val expiresAtIso: String get() = DateTimeFormatter.ISO_INSTANT.format(expiresAt)
+    val expiresAtIso: String get() = DateText.iso8601(expiresAt)
+    val session: FirebaseSession get() = FirebaseSession(idToken, refreshToken, expiresAtIso)
 }
 
 @Serializable
-private data class SignInRequest(
-    val email: String,
-    val password: String,
+private data class CustomTokenRequest(
+    val token: String,
     val returnSecureToken: Boolean = true,
     val tenantId: String? = null,
 )
@@ -38,7 +38,6 @@ private data class SignInResponse(
     val refreshToken: String? = null,
     val expiresIn: String? = null,
     val localId: String? = null,
-    val mfaPendingCredential: String? = null,
 )
 
 @Serializable
@@ -50,22 +49,21 @@ private data class RefreshResponse(
 )
 
 /**
- * Minimal Firebase Identity Platform client (REST, no SDK) — email/password sign-in against the
- * workspace's tenant plus refresh-token exchange. Errors are mapped to the same [ApiException]
- * family the rest of the SDK throws so the UI needs no special cases.
+ * Minimal Firebase Identity Platform client (REST, no SDK). The backend's tenant login returns a
+ * `firebase_custom_token`; this exchanges it for an ID token (`accounts:signInWithCustomToken`, with the
+ * workspace's Identity Platform tenant set) and renews it with the refresh token. There is deliberately no
+ * email/password sign-in: the Firebase users have no passwords (backend team, 2026-10-09).
  */
 class FirebaseAuth(
     val config: FirebaseConfig,
     private val http: OkHttpClient = OkHttpClient(),
     private val json: Json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true },
 ) {
-    suspend fun signIn(email: String, password: String): FirebaseTokens = withContext(Dispatchers.IO) {
-        val body = json.encodeToString(SignInRequest.serializer(), SignInRequest(email.trim(), password, tenantId = config.tenantId))
-        val res = call(Request.Builder().url(config.signInUrl).post(body.toRequestBody(JSON)).build())
+    /** Step 3 of sign-in. `tenantId` is sent with the request (set before signing in, as the web SDK requires). */
+    suspend fun signIn(customToken: String, tenantId: String?): FirebaseTokens = withContext(Dispatchers.IO) {
+        val body = json.encodeToString(CustomTokenRequest.serializer(), CustomTokenRequest(customToken, tenantId = tenantId?.takeIf { it.isNotBlank() }))
+        val res = call(Request.Builder().url(config.customTokenSignInUrl).post(body.toRequestBody(JSON)).build())
         val parsed = json.decodeFromString(SignInResponse.serializer(), res)
-        if (parsed.mfaPendingCredential != null) {
-            throw ApiException.Http(401, res, "This account requires multi-factor sign-in, which the mobile app does not support yet.")
-        }
         val id = parsed.idToken ?: throw ApiException.Decoding(IllegalStateException("No idToken in Firebase response"), res)
         FirebaseTokens(id, parsed.refreshToken ?: "", expiry(parsed.expiresIn), parsed.localId)
     }
@@ -93,19 +91,18 @@ class FirebaseAuth(
         }
     }
 
-    /** Firebase error bodies look like {"error":{"code":400,"message":"INVALID_LOGIN_CREDENTIALS"}}. */
+    /** Firebase error bodies look like {"error":{"code":400,"message":"INVALID_CUSTOM_TOKEN"}}. */
     private fun friendly(body: String, status: Int): String {
         val code = runCatching {
             ((json.parseToJsonElement(body) as? JsonObject)?.get("error") as? JsonObject)?.get("message")?.let { (it as? JsonPrimitive)?.contentOrNull }
         }.getOrNull() ?: return ApiException.defaultMessage(status)
         return when {
-            code.startsWith("INVALID_LOGIN_CREDENTIALS") || code.startsWith("INVALID_PASSWORD") || code.startsWith("EMAIL_NOT_FOUND") -> "Email or password is incorrect."
-            code.startsWith("USER_DISABLED") -> "This account has been disabled."
+            code.startsWith("INVALID_CUSTOM_TOKEN") || code.startsWith("CREDENTIAL_MISMATCH") -> "The Firebase sign-in token was rejected (project mismatch)."
+            code.startsWith("INVALID_TENANT_ID") || code.startsWith("TENANT_ID") || code.startsWith("MISSING_TENANT_ID") -> "This workspace's Firebase tenant is not configured."
+            code.startsWith("TOKEN_EXPIRED") || code.startsWith("INVALID_REFRESH_TOKEN") || code.startsWith("USER_NOT_FOUND") || code.startsWith("USER_DISABLED") -> "The Firebase session has expired. Sign in again to refresh it."
             code.startsWith("TOO_MANY_ATTEMPTS") -> "Too many attempts. Try again in a few minutes."
-            code.startsWith("INVALID_TENANT_ID") || code.startsWith("TENANT_ID") -> "Workspace sign-in is not configured correctly (Firebase tenant id)."
-            code.startsWith("API_KEY") || code.startsWith("INVALID_API_KEY") -> "Sign-in is not configured (Firebase API key)."
-            code.startsWith("TOKEN_EXPIRED") || code.startsWith("INVALID_REFRESH_TOKEN") || code.startsWith("USER_NOT_FOUND") -> "Your session expired. Please sign in again."
-            else -> code.lowercase().replace('_', ' ').replaceFirstChar { it.uppercase() }
+            code.startsWith("API_KEY") || code.startsWith("INVALID_API_KEY") -> "The app's Firebase configuration is invalid."
+            else -> "Firebase sign-in failed: " + code.lowercase().replace('_', ' ')
         }
     }
 

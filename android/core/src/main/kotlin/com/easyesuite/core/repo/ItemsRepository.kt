@@ -9,7 +9,8 @@ import com.easyesuite.core.model.ImageUploadResponse
 import com.easyesuite.core.model.InventoryItem
 import com.easyesuite.core.model.ItemCondition
 import com.easyesuite.core.model.ItemDetail
-import com.easyesuite.core.model.ItemHistoryEntry
+import com.easyesuite.core.model.HistoryFilter
+import com.easyesuite.core.model.ItemAuditEntry
 import com.easyesuite.core.model.ItemSummary
 import com.easyesuite.core.model.OpeningStockRequest
 import com.easyesuite.core.model.Page
@@ -24,6 +25,8 @@ import com.easyesuite.core.net.ApiException
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * Catalog, inventory levels, item creation. Endpoints and query parameters follow the backend
@@ -63,15 +66,28 @@ class ItemsRepository(private val client: ApiClient) {
         }
     }
 
-    /** `items/{type}/{id}/history/` — stock movements for the item (shape decoded leniently). */
-    suspend fun history(id: Long, itemType: String?, page: PageQuery = PageQuery(limit = 50)): List<ItemHistoryEntry> {
-        val raw: JsonElement = client.get(Endpoints.itemHistory(id, itemType), page.asMap())
-        val rows: JsonArray = when (raw) {
-            is JsonArray -> raw
-            is JsonObject -> (raw["results"] as? JsonArray) ?: JsonArray(emptyList())
-            else -> JsonArray(emptyList())
+    /**
+     * `items/{type}/{id}/history/` — the item's audit log, paginated (`limit`/`offset`), newest first.
+     * Tolerates the plain-array shape the OpenAPI file documents in case an older environment still returns it.
+     */
+    suspend fun history(id: Long, itemType: String?, filter: HistoryFilter = HistoryFilter(), page: PageQuery = PageQuery(limit = 25)): Page<ItemAuditEntry> {
+        val raw: JsonElement = client.get(Endpoints.itemHistory(id, itemType), page.asMap() + filter.asMap())
+        val rows: JsonArray
+        var count = 0
+        var next: String? = null
+        var previous: String? = null
+        when (raw) {
+            is JsonArray -> { rows = raw; count = raw.size }
+            is JsonObject -> {
+                rows = raw["results"] as? JsonArray ?: JsonArray(emptyList())
+                count = (raw["count"] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull()?.toInt() ?: rows.size
+                next = (raw["next"] as? JsonPrimitive)?.contentOrNull
+                previous = (raw["previous"] as? JsonPrimitive)?.contentOrNull
+            }
+            else -> rows = JsonArray(emptyList())
         }
-        return rows.mapNotNull { runCatching { client.json.decodeFromJsonElement(ItemHistoryEntry.serializer(), it) }.getOrNull() }
+        val entries = rows.mapNotNull { runCatching { client.json.decodeFromJsonElement(ItemAuditEntry.serializer(), it) }.getOrNull() }
+        return Page(count = count, next = next, previous = previous, results = entries)
     }
 
     suspend fun conditions(): List<ItemCondition> {

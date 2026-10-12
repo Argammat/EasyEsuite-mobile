@@ -117,9 +117,13 @@ jobs:
       - name: Archive (Release, manual signing)
         working-directory: ios
         env:
+          # Production values by default (empty API root = api-new.easyesuite.com). Firebase config enables the
+          # Firestore screens; it identifies the project only, but keep it in secrets — the repo is public.
           EASYESUITE_API_ROOT: ${{ vars.EASYESUITE_API_ROOT }}
           EASYESUITE_FIREBASE_API_KEY: ${{ secrets.EASYESUITE_FIREBASE_API_KEY }}
-          EASYESUITE_FIREBASE_TENANT_ID: ${{ vars.EASYESUITE_FIREBASE_TENANT_ID }}
+          EASYESUITE_FIREBASE_PROJECT_ID: ${{ secrets.EASYESUITE_FIREBASE_PROJECT_ID }}
+          EASYESUITE_FIRESTORE_CONNECTOR_DB: ${{ secrets.EASYESUITE_FIRESTORE_CONNECTOR_DB }}
+          EASYESUITE_FIRESTORE_NOTIFICATIONS_DB: ${{ secrets.EASYESUITE_FIRESTORE_NOTIFICATIONS_DB }}
         run: |
           set -o pipefail
           xcodebuild archive \
@@ -129,7 +133,8 @@ jobs:
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
             MARKETING_VERSION="${{ steps.ver.outputs.marketing }}" CURRENT_PROJECT_VERSION="${{ steps.ver.outputs.build }}" \
-            EASYESUITE_API_ROOT="$EASYESUITE_API_ROOT" EASYESUITE_FIREBASE_API_KEY="$EASYESUITE_FIREBASE_API_KEY" EASYESUITE_FIREBASE_TENANT_ID="$EASYESUITE_FIREBASE_TENANT_ID" \
+            EASYESUITE_API_ROOT="$EASYESUITE_API_ROOT" EASYESUITE_FIREBASE_API_KEY="$EASYESUITE_FIREBASE_API_KEY" \
+            EASYESUITE_FIREBASE_PROJECT_ID="$EASYESUITE_FIREBASE_PROJECT_ID" EASYESUITE_FIRESTORE_CONNECTOR_DB="$EASYESUITE_FIRESTORE_CONNECTOR_DB" EASYESUITE_FIRESTORE_NOTIFICATIONS_DB="$EASYESUITE_FIRESTORE_NOTIFICATIONS_DB" \
             2>&1 | tee "$RUNNER_TEMP/archive.log" | grep -E "error:|Signing Identity|Provisioning Profile|ARCHIVE (SUCCEEDED|FAILED)" || true
           grep -q "ARCHIVE SUCCEEDED" "$RUNNER_TEMP/archive.log"
 

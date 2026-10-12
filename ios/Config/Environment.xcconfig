@@ -1,0 +1,11 @@
+// Backend + Firebase configuration, one value per environment (see docs/API_MAP.md → Auth, Firebase).
+// Defaults = production REST API with the Firestore screens disabled. Put the real values for the
+// environment you build in Config/Environment.local.xcconfig (git-ignored) — never in this file:
+// the repository is public and the backend team asks that project ids and non-production hosts stay out of it.
+EASYESUITE_API_ROOT =
+EASYESUITE_FIREBASE_API_KEY =
+EASYESUITE_FIREBASE_PROJECT_ID =
+EASYESUITE_FIRESTORE_CONNECTOR_DB =
+EASYESUITE_FIRESTORE_NOTIFICATIONS_DB =
+
+#include? "Environment.local.xcconfig"

@@ -10,14 +10,13 @@ public final class APIClient: @unchecked Sendable {
     public var onSessionExpired: (@Sendable () -> Void)?
 
     private let session: URLSession
+    /// The URLSession this client sends on — shared with `FirebaseAuth` / `FirestoreClient` so tests can mock everything at once.
+    public var urlSession: URLSession { session }
     private let coordinator = RefreshCoordinator()
-    /// Explicit refresh strategy (tests); nil = follow the session's provider.
+    /// Explicit refresh strategy (tests); nil = the backend's `auth/token/refresh/`.
     private let refresherOverride: TokenRefresher?
-    private let firebaseRefresher: TokenRefresher?
 
-    /// - Parameter refresher: how an expired access token is renewed. When nil the strategy follows the session:
-    ///   tokens minted by Firebase (`Session.provider == firebase`) go through the securetoken exchange
-    ///   (needs `config.firebase`), everything else through the backend's `auth/token/refresh/`.
+    /// - Parameter refresher: how an expired access token is renewed; nil = `BackendTokenRefresher` (rotating refresh tokens).
     public init(config: ApiConfig, tokenStore: TokenStore, urlSession: URLSession? = nil, refresher: TokenRefresher? = nil) {
         self.config = config
         self.tokenStore = tokenStore
@@ -36,13 +35,10 @@ public final class APIClient: @unchecked Sendable {
             resolved = URLSession(configuration: cfg)
         }
         self.session = resolved
-        self.firebaseRefresher = config.firebase.map { FirebaseTokenRefresher(firebase: FirebaseAuth(config: $0, urlSession: resolved)) as TokenRefresher }
     }
 
     private func refresher(for session: Session) -> TokenRefresher {
-        if let refresherOverride { return refresherOverride }
-        if session.provider == Session.providerFirebase, let firebaseRefresher { return firebaseRefresher }
-        return BackendTokenRefresher(client: self)
+        refresherOverride ?? BackendTokenRefresher(client: self)
     }
 
     // MARK: - Public API
@@ -92,7 +88,7 @@ public final class APIClient: @unchecked Sendable {
     private func raw(_ method: String, url: URL, body: Data?, contentType: String?, authenticated: Bool) async throws -> Raw {
         var token = authenticated ? tokenStore.load()?.access : nil
         if authenticated, tokenStore.load()?.isAccessExpiring() == true, let fresh = await refreshAccessToken() {
-            // Firebase ID tokens live an hour; renew before the call instead of eating a 401 round-trip.
+            // Access tokens live 5 minutes; renew before the call instead of eating a 401 round-trip.
             token = fresh
         }
         var res = try await send(method, url: url, body: body, contentType: contentType, token: token)

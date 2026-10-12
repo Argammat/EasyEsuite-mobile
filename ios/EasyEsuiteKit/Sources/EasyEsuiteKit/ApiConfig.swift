@@ -1,7 +1,8 @@
 import Foundation
 
 /// Where the API lives. Every EasyEsuite tenant (company) has its own URL prefix:
-/// `https://api-new.easyesuite.com/clients/{tenant}/api/v1/`
+/// `https://api-new.easyesuite.com/clients/{tenant}/api/v1/` — `tenant` is the workspace's `schema_name`.
+/// Development and staging hosts are not committed to this (public) repository; they come from build settings.
 public struct ApiConfig: Equatable, Sendable {
     public static let defaultApiRoot = URL(string: "https://api-new.easyesuite.com/")!
 
@@ -9,9 +10,8 @@ public struct ApiConfig: Equatable, Sendable {
     public let apiRoot: URL
     /// Authorization header scheme; the backend expects `Bearer <token>`.
     public let authScheme: String
-    /// Firebase / Identity Platform settings. When set, the app signs in against Firebase directly (the
-    /// mechanism the backend team describes) and sends the Firebase ID token as Bearer. When nil it uses the
-    /// backend-proxied `auth/login/` + `auth/token/refresh/` flow. See docs/API_MAP.md → Auth.
+    /// Firebase project of this environment — only needed for the Firestore-backed screens (Copilot history,
+    /// notifications, connector status). Nil = those screens are unavailable; the REST API still works.
     public let firebase: FirebaseConfig?
 
     public init(tenant: String, apiRoot: URL = ApiConfig.defaultApiRoot, authScheme: String = "Bearer", firebase: FirebaseConfig? = nil) {
@@ -23,34 +23,50 @@ public struct ApiConfig: Equatable, Sendable {
 
     public var tenantRoot: URL { apiRoot.appendingPathComponent("clients/\(tenant)/api/v1", isDirectory: true) }
     public var globalRoot: URL { apiRoot.appendingPathComponent("api/v1", isDirectory: true) }
+
+    /// "Production" / "Staging" / "Development", derived from the host so the Settings screen can show which backend a build talks to.
+    public var environmentName: String {
+        let host = apiRoot.host?.lowercased() ?? ""
+        if host.hasPrefix("stg-") || host.contains("staging") { return "Staging" }
+        if host.hasPrefix("dev-") || host.contains(".run.app") || host.contains("localhost") { return "Development" }
+        return "Production"
+    }
 }
 
-/// Firebase Identity Platform configuration. The web API key is public (it ships in the web bundle);
-/// the tenant id is the workspace's Identity Platform tenant (the web app stores it as `firebaseTenantId`).
+/// Firebase project settings (per environment, from build settings — never hard-coded). The web API key and
+/// project id identify the project and ship inside the app; they grant nothing by themselves. The named
+/// Firestore databases hold the Copilot conversations / connector status and the in-app notifications.
 public struct FirebaseConfig: Equatable, Sendable {
     public let apiKey: String
-    /// Identity Platform tenant id for this workspace. Nil = project-level users (no multi-tenancy).
-    public let tenantId: String?
+    public let projectId: String
+    public let connectorDatabase: String
+    public let notificationsDatabase: String
 
-    public init(apiKey: String, tenantId: String? = nil) {
+    public init(apiKey: String, projectId: String, connectorDatabase: String = "(default)", notificationsDatabase: String = "(default)") {
         self.apiKey = apiKey
-        self.tenantId = tenantId?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        self.projectId = projectId
+        self.connectorDatabase = connectorDatabase
+        self.notificationsDatabase = notificationsDatabase
     }
 
-    public var signInURL: URL { URL(string: "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=\(apiKey)")! }
+    /// `accounts:signInWithCustomToken` — the backend hands the app a custom token at login; there is no password sign-in.
+    public var customTokenSignInURL: URL { URL(string: "https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=\(apiKey)")! }
     public var refreshURL: URL { URL(string: "https://securetoken.googleapis.com/v1/token?key=\(apiKey)")! }
+    public func firestoreRoot(database: String) -> URL { URL(string: "https://firestore.googleapis.com/v1/projects/\(projectId)/databases/\(database)/documents/")! }
 }
 
 /// Relative API paths, kept in one place so docs/API_MAP.md and the code agree.
 public enum Endpoints {
-    // Auth (tenant scoped) — backend-proxied flow
+    // Auth — VERIFIED with the backend team (2026-10-09 answers)
+    /// Global (no tenant prefix): `{email, password}` → the user's workspaces, most recently used first. Returns no token.
+    public static let loginTenants = "auth/login/tenants/"
+    /// Tenant-scoped: `{email, password}` → `{access (5 min), refresh (1 day), firebase_custom_token?, user}`.
     public static let login = "auth/login/"
     public static let login2FA = "auth/login/2fa/"
+    /// Tenant-scoped: `{refresh}` → a NEW access and a NEW refresh (each refresh token works once).
     public static let tokenRefresh = "auth/token/refresh/"
     public static let me = "users/users/me/"
     public static let myTenants = "users/me/tenants/"
-    /// Global (no tenant prefix): resolves a company name to its tenant + Firebase tenant id. ASSUMED.
-    public static let tenantLookup = "clients/clients/"
 
     // Items (VERIFIED against the web app source, Oct 2026)
     public static let items = "items/items/"
@@ -114,8 +130,7 @@ public enum Endpoints {
     public static let aiCredits = "ai/ai_credits/status/"
 }
 
-/// `item_type` codes. "INV" is verified; the kit and variant codes are the web app's
-/// `item_type` filter values and still need confirming (an unknown code just filters to nothing).
+/// `item_type` has exactly three values (VERIFIED, backend team 2026-10-09): "INV", "KIT", "VAR".
 public enum ItemTypes {
     public static let inventory = "INV"
     public static let kit = "KIT"

@@ -5,23 +5,9 @@ public protocol TokenRefresher: Sendable {
     func refresh(_ current: Session) async -> Session?
 }
 
-/// Identity Platform: exchange the Firebase refresh token for a new ID token.
-public struct FirebaseTokenRefresher: TokenRefresher {
-    let firebase: FirebaseAuth
-    public init(firebase: FirebaseAuth) { self.firebase = firebase }
-
-    public func refresh(_ current: Session) async -> Session? {
-        guard let refresh = current.refresh, let tokens = try? await firebase.refresh(refresh) else { return nil }
-        var updated = current
-        updated.access = tokens.idToken
-        updated.refresh = tokens.refreshToken.isEmpty ? refresh : tokens.refreshToken
-        updated.accessExpiration = tokens.expiresAtIso
-        updated.provider = Session.providerFirebase
-        return updated
-    }
-}
-
-/// Backend-proxied flow: `POST auth/token/refresh/ {refresh}` → `{access, access_expiration}` (the call the web app makes).
+/// `POST /clients/{tenant}/api/v1/auth/token/refresh/ {refresh}` → a **new access and a new refresh token**
+/// (VERIFIED). Each refresh token works once, so both are stored; `APIClient` serialises the calls so only
+/// one refresh is ever in flight.
 public struct BackendTokenRefresher: TokenRefresher {
     let client: APIClient
     public init(client: APIClient) { self.client = client }
@@ -29,16 +15,15 @@ public struct BackendTokenRefresher: TokenRefresher {
     public func refresh(_ current: Session) async -> Session? {
         guard let refresh = current.refresh,
               let body = try? client.encoder.encode(RefreshRequest(refresh: refresh)),
-              let res = try? await client.rawPost(current.isPending ? client.globalPath(Endpoints.tokenRefresh) : Endpoints.tokenRefresh, body: body),
+              let res = try? await client.rawPost(Endpoints.tokenRefresh, body: body),
               (200..<300).contains(res.status),
               let parsed = try? client.decoder.decode(TokenResponse.self, from: res.data),
               let access = parsed.resolvedAccess else { return nil }
         var updated = current
         updated.access = access
         updated.refresh = parsed.resolvedRefresh ?? current.refresh
-        updated.accessExpiration = parsed.accessExpiration ?? current.accessExpiration
-        updated.refreshExpiration = parsed.refreshExpiration ?? current.refreshExpiration
-        updated.provider = Session.providerBackend
+        updated.accessExpiration = parsed.accessExpiration ?? JWT.expirationIso(access) ?? current.accessExpiration
+        updated.refreshExpiration = parsed.refreshExpiration ?? JWT.expirationIso(updated.refresh) ?? current.refreshExpiration
         return updated
     }
 }

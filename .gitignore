@@ -15,6 +15,9 @@ asc-out/
 *.p12
 *.mobileprovision
 AuthKey_*.p8
+# per-environment backend + Firebase values (ios/Config/Environment.local.xcconfig.example)
+ios/Config/Environment.local.xcconfig
+android/easyesuite.properties
 ios/*.xcodeproj/
 ios/*.xcworkspace/
 ios/**/xcuserdata/

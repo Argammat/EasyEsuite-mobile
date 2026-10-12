@@ -1,0 +1,29 @@
+{
+  "count": 137,
+  "next": "https://api-new.easyesuite.com/clients/acmecorp/api/v1/items/inventory_items/90211/history/?limit=25&offset=25",
+  "previous": null,
+  "results": [
+    {
+      "id": 90211,
+      "action": "update",
+      "actor": "jane@acme.com",
+      "timestamp": "2026-10-07T09:41:22.118Z",
+      "content_type": "erp | item",
+      "remote_addr": "203.0.113.7",
+      "changes": {
+        "sale_price": ["19.99", "17.49"],
+        "modified_by": ["bob@acme.com", "jane@acme.com"]
+      }
+    },
+    {
+      "id": 90210,
+      "action": "create",
+      "actor": null,
+      "timestamp": "2026-10-01T08:00:00.000Z",
+      "content_type": "erp | item",
+      "changes": {
+        "warehouses": [null, [{"id": 3, "qty": 10}]]
+      }
+    }
+  ]
+}

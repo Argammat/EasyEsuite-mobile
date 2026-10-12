@@ -1,5 +1,7 @@
 package com.easyesuite.app.ui.auth
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -42,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -52,6 +55,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import coil.compose.AsyncImage
+import com.easyesuite.app.BuildConfig
 import com.easyesuite.app.R
 import com.easyesuite.app.di.AppContainer
 import com.easyesuite.app.ui.common.userMessage
@@ -59,16 +64,17 @@ import com.easyesuite.app.ui.theme.GreenText
 import com.easyesuite.app.ui.theme.GreenTint
 import com.easyesuite.core.auth.LoginResult
 import com.easyesuite.core.auth.Session
-import com.easyesuite.core.model.TenantInfo
+import com.easyesuite.core.auth.Workspace
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * Sign-in like the web app: email + password, then choose the workspace (company).
- * Steps: [Step.CREDENTIALS] → optional [Step.SECOND_FACTOR] → [Step.WORKSPACE] (skipped with a single workspace).
+ * Sign-in as the backend specifies it: email + password list the user's workspaces (no token yet), the chosen
+ * workspace is then logged into with the same credentials. The password lives only in this view model, in
+ * memory, until the login succeeds.
  */
-enum class Step { CREDENTIALS, SECOND_FACTOR, WORKSPACE }
+enum class Step { CREDENTIALS, WORKSPACE, SECOND_FACTOR, PASSWORD_RESET }
 
 data class LoginUi(
     val step: Step = Step.CREDENTIALS,
@@ -78,50 +84,79 @@ data class LoginUi(
     val busy: Boolean = false,
     val error: String? = null,
     val message: String? = null,
-    val challengeToken: String? = null,
-    /** Tokens waiting for a workspace. */
-    val pending: Session? = null,
-    val workspaces: List<TenantInfo> = emptyList(),
+    val workspaces: List<Workspace> = emptyList(),
     val selectedTenant: String? = null,
-    /** Typed slug when the backend returned no workspace list. */
-    val manualTenant: String = "",
     val switching: Boolean = false,
 ) {
     val canSubmit: Boolean get() = !busy && email.contains('@') && password.length >= 4
-    val chosenTenant: String? get() = (selectedTenant ?: manualTenant.trim().lowercase()).takeIf { !it.isNullOrBlank() }
+    val selectedWorkspace: Workspace? get() = workspaces.firstOrNull { it.schemaName == selectedTenant }
 }
 
 class LoginViewModel(private val container: AppContainer) : ViewModel() {
-    val ui = MutableStateFlow(LoginUi(email = container.tokenStore.lastEmail ?: ""))
-
-    init {
-        // "Switch workspace" from Settings: tokens are still valid, go straight to the picker.
-        container.pendingSwitch?.let { pending -> openPicker(pending, emptyList(), switching = true) }
-    }
+    private val switching = container.switchingWorkspace.value
+    val ui = MutableStateFlow(
+        LoginUi(
+            email = container.tokenStore.lastEmail ?: "",
+            switching = switching,
+            message = if (switching) "Enter your password to choose another workspace." else null,
+        ),
+    )
+    private var challengeToken: String? = null
+    private var pendingSession: Session? = null
 
     fun set(transform: LoginUi.() -> LoginUi) = ui.update { it.transform().copy(error = null) }
 
+    /** Step 1: list the workspaces. One workspace → straight to step 2. */
     fun submit() {
         val s = ui.value
         if (!s.canSubmit) return
         ui.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
-            val graph = container.graphFor()   // no tenant yet: global sign-in
             try {
-                handle(graph.auth.login(s.email, s.password))
+                val list = container.graphFor().auth.workspaces(s.email, s.password)
+                val current = container.session.value?.tenant
+                val preferred = if (s.switching) list.firstOrNull { it.schemaName != current }
+                else list.firstOrNull { it.schemaName == container.tokenStore.lastTenant } ?: list.firstOrNull()
+                ui.update { it.copy(workspaces = list, selectedTenant = (preferred ?: list.firstOrNull())?.schemaName) }
+                when {
+                    list.size == 1 && !s.switching -> login(list.single().schemaName)
+                    list.isEmpty() -> ui.update { it.copy(busy = false, error = "Your account has no workspace yet. Ask an administrator to add you to a company.") }
+                    else -> ui.update { it.copy(busy = false, step = Step.WORKSPACE) }
+                }
             } catch (e: Exception) {
                 ui.update { it.copy(busy = false, error = friendly(e)) }
             }
         }
     }
 
+    fun selectWorkspace(schemaName: String) = ui.update { it.copy(selectedTenant = schemaName, error = null) }
+
+    /** Step 2: log in to the chosen workspace. */
+    fun continueToWorkspace() {
+        val s = ui.value
+        val tenant = s.selectedTenant ?: return
+        if (s.busy) return
+        ui.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch { login(tenant) }
+    }
+
+    private suspend fun login(tenant: String) {
+        val s = ui.value
+        try {
+            handle(container.graphFor(tenant).auth.login(s.email, s.password))
+        } catch (e: Exception) {
+            ui.update { it.copy(busy = false, error = friendly(e)) }
+        }
+    }
+
     fun submitCode() {
         val s = ui.value
-        if (s.code.length < 4) return
+        val tenant = s.selectedTenant ?: return
+        if (s.code.length < 4 || s.busy) return
         ui.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
             try {
-                handle(container.graphFor().auth.completeSecondFactor(s.email, s.challengeToken, s.code))
+                handle(container.graphFor(tenant).auth.completeSecondFactor(s.email, challengeToken, pendingSession, s.code))
             } catch (e: Exception) {
                 ui.update { it.copy(busy = false, error = friendly(e)) }
             }
@@ -130,46 +165,24 @@ class LoginViewModel(private val container: AppContainer) : ViewModel() {
 
     private fun handle(result: LoginResult) {
         when (result) {
-            is LoginResult.Success -> container.onSignedIn(result.session)
-            is LoginResult.SecondFactorRequired -> ui.update {
-                it.copy(busy = false, step = Step.SECOND_FACTOR, challengeToken = result.challengeToken, message = result.message ?: "Enter the code from your authenticator app.")
+            is LoginResult.Success -> {
+                pendingSession = null; challengeToken = null
+                ui.update { it.copy(password = "", code = "", busy = false) }
+                container.onSignedIn(result.session)
             }
-            is LoginResult.WorkspaceRequired -> openPicker(result.pending, result.workspaces, switching = false)
-        }
-    }
-
-    private fun openPicker(pending: Session, workspaces: List<TenantInfo>, switching: Boolean) {
-        val last = container.tokenStore.lastTenant
-        ui.update {
-            it.copy(
-                step = Step.WORKSPACE, busy = workspaces.isEmpty() && switching, pending = pending, workspaces = workspaces, switching = switching,
-                selectedTenant = workspaces.firstOrNull { w -> w.slug == last }?.slug ?: workspaces.firstOrNull()?.slug,
-            )
-        }
-        if (workspaces.isEmpty() && switching) {
-            viewModelScope.launch {
-                // Still inside the previous workspace: its graph tries the global list and the tenant-scoped (verified) one.
-                val list = runCatching { container.graphFor(last.orEmpty()).auth.workspaces() }.getOrDefault(emptyList())
-                ui.update { it.copy(busy = false, workspaces = list, selectedTenant = list.firstOrNull { w -> w.slug == last }?.slug ?: list.firstOrNull()?.slug) }
+            is LoginResult.SecondFactorRequired -> {
+                pendingSession = result.pending; challengeToken = result.challengeToken
+                ui.update { it.copy(busy = false, step = Step.SECOND_FACTOR, message = result.message ?: "Enter the code from your authenticator app.") }
             }
+            is LoginResult.PasswordResetRequired -> ui.update { it.copy(busy = false, password = "", step = Step.PASSWORD_RESET) }
         }
-    }
-
-    fun selectWorkspace(slug: String) = ui.update { it.copy(selectedTenant = slug, error = null) }
-
-    fun continueToWorkspace() {
-        val s = ui.value
-        val pending = s.pending ?: return
-        val tenant = s.chosenTenant ?: return
-        val session = container.graphFor().auth.selectWorkspace(pending, tenant)
-        container.onSignedIn(session)
     }
 
     fun back() {
         val s = ui.value
-        if (s.step == Step.WORKSPACE && s.switching) { container.cancelWorkspaceSwitch(); return }
-        container.graphFor().auth.logout()
-        ui.update { LoginUi(email = it.email) }
+        if (s.switching && s.step == Step.CREDENTIALS) { container.cancelWorkspaceSwitch(); return }
+        pendingSession = null; challengeToken = null
+        ui.update { it.copy(step = Step.CREDENTIALS, code = "", error = null, busy = false, message = if (it.switching) it.message else null) }
     }
 
     private fun friendly(e: Exception): String {
@@ -189,13 +202,21 @@ fun LoginScreen(vm: LoginViewModel) {
         Column(Modifier.padding(horizontal = 24.dp, vertical = 24.dp)) {
             when (ui.step) {
                 Step.CREDENTIALS -> CredentialsForm(ui, vm)
-                Step.SECOND_FACTOR -> SecondFactorForm(ui, vm)
                 Step.WORKSPACE -> WorkspacePicker(ui, vm)
+                Step.SECOND_FACTOR -> SecondFactorForm(ui, vm)
+                Step.PASSWORD_RESET -> PasswordResetNotice(vm)
             }
             if (ui.error != null) {
                 Spacer(Modifier.height(16.dp))
                 Text(ui.error!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
             }
+        }
+        if (AppContainer.environmentName != "Production") {
+            Text(
+                "${AppContainer.environmentName} backend · ${Uri.parse(BuildConfig.API_ROOT).host.orEmpty()}",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+            )
         }
     }
 }
@@ -221,8 +242,8 @@ private fun BrandBand() {
 @Composable
 private fun CredentialsForm(ui: LoginUi, vm: LoginViewModel) {
     var showPassword by remember { mutableStateOf(false) }
-    Text("Log in", style = MaterialTheme.typography.headlineSmall)
-    Text("Welcome back — sign in to continue.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline)
+    Text(if (ui.switching) "Switch workspace" else "Log in", style = MaterialTheme.typography.headlineSmall)
+    Text(ui.message ?: "Welcome back — sign in to continue.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline)
     Spacer(Modifier.height(20.dp))
     OutlinedTextField(
         value = ui.email, onValueChange = { v -> vm.set { copy(email = v) } },
@@ -243,13 +264,31 @@ private fun CredentialsForm(ui: LoginUi, vm: LoginViewModel) {
     )
     Spacer(Modifier.height(20.dp))
     Button(onClick = vm::submit, enabled = ui.canSubmit, modifier = Modifier.fillMaxWidth().height(50.dp)) {
-        if (ui.busy) CircularProgressIndicator(Modifier.height(22.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary) else Text("Log in")
+        if (ui.busy) CircularProgressIndicator(Modifier.height(22.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary) else Text(if (ui.switching) "Continue" else "Log in")
     }
     Spacer(Modifier.height(12.dp))
-    Text(
-        "After signing in you choose which company to work in — the same workspaces you see on erp.easyesuite.com.",
-        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
-    )
+    if (ui.switching) {
+        TextButton(onClick = vm::back, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
+    } else {
+        Text(
+            "After signing in you choose which company to work in — the same workspaces you see on erp.easyesuite.com.",
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+        )
+    }
+}
+
+@Composable
+private fun WorkspacePicker(ui: LoginUi, vm: LoginViewModel) {
+    Text("Choose your workspace", style = MaterialTheme.typography.headlineSmall)
+    Text("Workspaces for ${ui.email}. You can switch any time from Settings.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline)
+    Spacer(Modifier.height(16.dp))
+    ui.workspaces.forEach { w -> WorkspaceRow(w, selected = w.schemaName == ui.selectedTenant) { vm.selectWorkspace(w.schemaName) } }
+    Spacer(Modifier.height(20.dp))
+    Button(onClick = vm::continueToWorkspace, enabled = ui.selectedTenant != null && !ui.busy, modifier = Modifier.fillMaxWidth().height(50.dp)) {
+        if (ui.busy) CircularProgressIndicator(Modifier.height(22.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+        else Text(ui.selectedWorkspace?.let { "Continue to ${it.name}" } ?: "Continue")
+    }
+    TextButton(onClick = vm::back) { Text(if (ui.switching) "Cancel" else "Use a different account") }
 }
 
 @Composable
@@ -270,35 +309,23 @@ private fun SecondFactorForm(ui: LoginUi, vm: LoginViewModel) {
 }
 
 @Composable
-private fun WorkspacePicker(ui: LoginUi, vm: LoginViewModel) {
-    Text("Choose your workspace", style = MaterialTheme.typography.headlineSmall)
+private fun PasswordResetNotice(vm: LoginViewModel) {
+    val context = LocalContext.current
+    Text("Password reset required", style = MaterialTheme.typography.headlineSmall)
     Text(
-        "Signed in as ${ui.pending?.email ?: ui.email}. You can switch workspaces any time from Settings.",
+        "Your administrator requires a new password before you can continue. Reset it on the web, then sign in here again.",
         style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.outline,
     )
-    Spacer(Modifier.height(16.dp))
-    when {
-        ui.busy && ui.workspaces.isEmpty() -> Row(verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp); Spacer(Modifier.width(10.dp)); Text("Loading your workspaces…") }
-        ui.workspaces.isEmpty() -> {
-            Text("We couldn't list your workspaces — enter the company name you use on the web.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = ui.manualTenant, onValueChange = { v -> vm.set { copy(manualTenant = v) } },
-                label = { Text("Company (workspace)") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done, autoCorrectEnabled = false),
-            )
-        }
-        else -> ui.workspaces.forEach { w -> WorkspaceRow(w, selected = w.slug == ui.selectedTenant) { vm.selectWorkspace(w.slug) } }
-    }
     Spacer(Modifier.height(20.dp))
-    Button(onClick = vm::continueToWorkspace, enabled = ui.chosenTenant != null && !ui.busy, modifier = Modifier.fillMaxWidth().height(50.dp)) {
-        Text(ui.chosenTenant?.let { "Continue to $it" } ?: "Continue")
-    }
-    TextButton(onClick = vm::back) { Text(if (ui.switching) "Cancel" else "Use a different account") }
+    Button(
+        onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://erp.easyesuite.com/login"))) },
+        modifier = Modifier.fillMaxWidth().height(50.dp),
+    ) { Text("Reset on erp.easyesuite.com") }
+    TextButton(onClick = vm::back, modifier = Modifier.fillMaxWidth()) { Text("Back to sign in") }
 }
 
 @Composable
-private fun WorkspaceRow(w: TenantInfo, selected: Boolean, onClick: () -> Unit) {
+private fun WorkspaceRow(w: Workspace, selected: Boolean, onClick: () -> Unit) {
     val shape = RoundedCornerShape(16.dp)
     Row(
         Modifier.fillMaxWidth().padding(vertical = 5.dp).clip(shape)
@@ -308,12 +335,16 @@ private fun WorkspaceRow(w: TenantInfo, selected: Boolean, onClick: () -> Unit) 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(GreenTint), contentAlignment = Alignment.Center) {
-            Text(w.slug.take(2).uppercase(), color = GreenText, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            if (w.logoUrl.isNullOrBlank()) {
+                Text(w.monogram, color = GreenText, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            } else {
+                AsyncImage(model = w.logoUrl, contentDescription = w.name, modifier = Modifier.size(32.dp))
+            }
         }
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
-            Text(w.slug, fontWeight = FontWeight.SemiBold)
-            if (w.name.isNotBlank() && !w.name.equals(w.slug, ignoreCase = true)) Text(w.name, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+            Text(w.name, fontWeight = FontWeight.SemiBold)
+            Text(w.schemaName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
         }
         if (selected) Icon(Icons.Default.Check, contentDescription = "Selected", tint = GreenText)
     }

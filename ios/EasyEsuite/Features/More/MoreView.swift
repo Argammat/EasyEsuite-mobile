@@ -34,9 +34,10 @@ struct SettingsView: View {
             Section("Signed in as") {
                 KeyValueRow(label: "Name", value: profile?.displayName)
                 KeyValueRow(label: "Email", value: profile?.email ?? container.session?.email)
-                KeyValueRow(label: "Role", value: profile?.roleText)
+                KeyValueRow(label: "Role", value: profile?.roleText ?? container.session?.roles.joined(separator: ", ").nilIfEmpty)
                 KeyValueRow(label: "Workspace", value: graph.tenant)
-                KeyValueRow(label: "API", value: ApiConfig.defaultApiRoot.absoluteString)
+                KeyValueRow(label: "Environment", value: AppConfig.environmentName)
+                KeyValueRow(label: "Live data", value: container.session?.hasFirestore == true ? "Connected" : (AppConfig.hasFirebase ? "Unavailable for this workspace" : "Not configured in this build"))
                 KeyValueRow(label: "App version", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
                 if let error { Text(error).foregroundStyle(.red).font(.caption) }
             }
@@ -49,6 +50,6 @@ struct SettingsView: View {
         .task { do { profile = try await graph.auth.me() } catch { self.error = error.userMessage } }
         .confirmationDialog("Sign out?", isPresented: $confirmSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { container.signOut() }
-        } message: { Text("You'll need your company name, email and password to sign back in.") }
+        } message: { Text("You'll need your email and password to sign back in.") }
     }
 }

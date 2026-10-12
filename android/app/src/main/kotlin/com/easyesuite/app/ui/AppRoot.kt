@@ -96,8 +96,10 @@ private val tabs = listOf(
 @Composable
 fun AppRoot(container: AppContainer) {
     val session by container.session.collectAsState()
-    if (session == null) {
-        val vm: LoginViewModel = viewModel(key = "login") { LoginViewModel(container) }
+    val switching by container.switchingWorkspace.collectAsState()
+    if (session == null || switching) {
+        // Keyed on `switching` so the view model starts fresh (prefilled email, "switch" copy) for each use.
+        val vm: LoginViewModel = viewModel(key = "login-$switching") { LoginViewModel(container) }
         LoginScreen(vm)
     } else {
         // Re-create the whole nav graph when the tenant changes so no ViewModel outlives its session.

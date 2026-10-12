@@ -152,11 +152,11 @@ final class APIClientTests: XCTestCase {
         XCTAssertEqual(ItemTypes.badge("kit_package"), "Kit")
     }
 
-    func testExpiringAccessTokenIsRefreshedBeforeTheRequest() async throws {
+    func testExpiringAccessTokenIsRefreshedBeforeTheRequestAndBothTokensRotate() async throws {
         store.save(Session(tenant: "demo", access: "stale", refresh: "refresh-1", accessExpiration: "2020-01-01T00:00:00Z"))
         let warehouses = try fixture("warehouses")
         MockURLProtocol.handler = { req in
-            if req.url!.absoluteString.hasSuffix("/auth/token/refresh/") { return (200, Data(#"{"access":"fresh","access_expiration":"2099-01-01T00:00:00Z"}"#.utf8)) }
+            if req.url!.absoluteString.hasSuffix("/auth/token/refresh/") { return (200, Data(#"{"access":"fresh","refresh":"refresh-2","access_expiration":"2099-01-01T00:00:00Z"}"#.utf8)) }
             return (200, warehouses)
         }
         let page: Page<Warehouse> = try await client.get("items/warehouses/")
@@ -165,79 +165,151 @@ final class APIClientTests: XCTestCase {
         XCTAssertTrue(MockURLProtocol.requests[0].url!.absoluteString.hasSuffix("/clients/demo/api/v1/auth/token/refresh/"))
         XCTAssertEqual(MockURLProtocol.requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer fresh")
         XCTAssertEqual(store.load()?.access, "fresh")
-        XCTAssertEqual(store.load()?.provider, Session.providerBackend)
+        XCTAssertEqual(store.load()?.refresh, "refresh-2")   // each refresh token works once: the new one must be kept
     }
 
-    func testOlderSessionsDecodeWithoutProvider() throws {
-        let legacy = Data(#"{"tenant":"demo","access":"a","refresh":"r","email":"x@y.z"}"#.utf8)
+    func testOlderSessionsStillDecode() throws {
+        let legacy = Data(#"{"tenant":"demo","access":"a","refresh":"r","email":"x@y.z","provider":"backend"}"#.utf8)
         let s = try JSONDecoder().decode(Session.self, from: legacy)
-        XCTAssertEqual(s.provider, Session.providerBackend)
         XCTAssertNil(s.firebaseTenantId)
+        XCTAssertEqual(s.roles, [])
+        XCTAssertFalse(s.hasFirestore)
         XCTAssertFalse(s.isAccessExpiring())   // unknown expiry → not expiring
         XCTAssertTrue(Session(tenant: "d", access: "a", accessExpiration: "2020-01-01T00:00:00Z").isAccessExpiring())
     }
 
-    func testEmailPasswordLoginWithoutTenantLeadsToWorkspacePicker() async throws {
-        store.clear()
+    /// A JWT whose payload says `exp` = 2099-01-01 (no signature check; only the claim is read).
+    private static func jwt(exp: TimeInterval) -> String {
+        let payload = try! JSONSerialization.data(withJSONObject: ["exp": exp, "token_type": "access"])
+        let b64 = { (d: Data) in d.base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "") }
+        return "\(b64(Data("{\"alg\":\"HS256\"}".utf8))).\(b64(payload)).sig"
+    }
+
+    func testAccessExpiryFallsBackToTheJWTExpClaim() throws {
+        let token = Self.jwt(exp: 4070908800)   // 2099-01-01T00:00:00Z
+        XCTAssertEqual(JWT.expiration(token), Date(timeIntervalSince1970: 4070908800))
+        XCTAssertEqual(JWT.expirationIso(token), "2099-01-01T00:00:00Z")
+        XCTAssertNil(JWT.expiration("not-a-jwt"))
+    }
+
+    private func globalClient() -> APIClient {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.protocolClasses = [MockURLProtocol.self]
-        let global = APIClient(config: ApiConfig(tenant: ""), tokenStore: store, urlSession: URLSession(configuration: cfg))
+        return APIClient(config: ApiConfig(tenant: ""), tokenStore: store, urlSession: URLSession(configuration: cfg))
+    }
+
+    private func tenantClient(_ tenant: String, firebase: FirebaseConfig? = nil) -> APIClient {
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.protocolClasses = [MockURLProtocol.self]
+        return APIClient(config: ApiConfig(tenant: tenant, firebase: firebase), tokenStore: store, urlSession: URLSession(configuration: cfg))
+    }
+
+    /// Step 1 — `POST api/v1/auth/login/tenants/` lists the workspaces and never returns a token.
+    func testWorkspacesAreListedFromTheGlobalRootWithoutAToken() async throws {
+        store.clear()
+        MockURLProtocol.handler = { req in
+            guard req.url!.absoluteString == "https://api-new.easyesuite.com/api/v1/auth/login/tenants/" else { return (404, Data()) }
+            return (200, Data(#"[{"tenant_id":42,"schema_name":"nationwide","display_name":"Nationwide","company_name":"Nationwide","logo_url":null,"initials":"NW","last_active_at":"2026-10-08T14:03:11Z"},{"tenant_id":7,"schema_name":"ama","display_name":"AMA Investment Group LLC"}]"#.utf8))
+        }
+        let list = try await AuthService(client: globalClient()).workspaces(email: " am@example.com ", password: "pw")
+        XCTAssertEqual(list.map(\.schemaName), ["nationwide", "ama"])
+        XCTAssertEqual(list[0].name, "Nationwide"); XCTAssertEqual(list[0].monogram, "NW"); XCTAssertEqual(list[0].tenantId, 42)
+        XCTAssertEqual(list[1].monogram, "AM")
+        let req = try XCTUnwrap(MockURLProtocol.requests.first)
+        XCTAssertNil(req.value(forHTTPHeaderField: "Authorization"))
+        let body = try XCTUnwrap(req.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        XCTAssertEqual(body["email"] as? String, "am@example.com")
+        XCTAssertEqual(body["password"] as? String, "pw")
+        XCTAssertNil(store.load())
+    }
+
+    func testWrongPasswordAndRateLimitBecomeFriendlyErrors() async {
+        store.clear()
+        MockURLProtocol.handler = { _ in (401, Data(#"{"errors":{"detail":"Unable to log in with provided credentials."}}"#.utf8)) }
+        do { _ = try await AuthService(client: globalClient()).workspaces(email: "a@b.c", password: "x"); XCTFail("expected 401") }
+        catch APIError.http(let status, let detail, _) { XCTAssertEqual(status, 401); XCTAssertEqual(detail, "Email or password is incorrect.") }
+        catch { XCTFail("unexpected \(error)") }
+        MockURLProtocol.handler = { _ in (429, Data()) }
+        do { _ = try await AuthService(client: globalClient()).workspaces(email: "a@b.c", password: "x"); XCTFail("expected 429") }
+        catch APIError.http(let status, let detail, _) { XCTAssertEqual(status, 429); XCTAssertTrue(detail.contains("Too many")) }
+        catch { XCTFail("unexpected \(error)") }
+    }
+
+    /// Step 2 + 3 — tenant login stores the JWTs (expiry from the JWT when the body omits it) and exchanges the
+    /// custom token for Firebase tokens with the workspace's Identity Platform tenant.
+    func testTenantLoginStoresTokensAndSignsInToFirebaseWithTheCustomToken() async throws {
+        store.clear()
+        let access = Self.jwt(exp: 4070908800)
+        let firebase = FirebaseConfig(apiKey: "key-1", projectId: "proj", connectorDatabase: "connector-db", notificationsDatabase: "notifications-db")
         MockURLProtocol.handler = { req in
             let u = req.url!.absoluteString
-            if u.hasSuffix("/api/v1/auth/login/") { return (200, Data(#"{"access":"a1","refresh":"r1","access_expiration":"2099-01-01T00:00:00Z"}"#.utf8)) }
-            if u.hasSuffix("/api/v1/users/me/tenants/") { return (200, Data(#"{"results":[{"slug":"nationwide","display_name":"Nationwide"},{"slug":"ama","display_name":"AMA invesment Group LLC"}]}"#.utf8)) }
+            if u == "https://api-new.easyesuite.com/clients/nationwide/api/v1/auth/login/" {
+                return (200, Data("""
+                {"access":"\(access)","refresh":"r1","firebase_custom_token":"custom-1",
+                 "user":{"pk":7,"email":"am@example.com","tenant_id":42,"firebase_tenant_id":"nationwide-x1y2z","is_mfa_enabled":false,"is_mfa_mandatory":false,"needs_password_reset":false,"all_role_names":["ADMIN"],"plan_name":"Pro"}}
+                """.utf8))
+            }
+            if u.hasPrefix("https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=key-1") {
+                return (200, Data(#"{"idToken":"fb-id","refreshToken":"fb-refresh","expiresIn":"3600"}"#.utf8))
+            }
             return (404, Data())
         }
-        let auth = AuthService(client: global)
-        let result = try await auth.login(email: "am@example.com", password: "pw")
-        XCTAssertEqual(MockURLProtocol.requests[0].url?.absoluteString, "https://api-new.easyesuite.com/api/v1/auth/login/")   // global root — no tenant yet
-        XCTAssertEqual(MockURLProtocol.requests[1].url?.absoluteString, "https://api-new.easyesuite.com/api/v1/users/me/tenants/")
-        XCTAssertEqual(MockURLProtocol.requests[1].value(forHTTPHeaderField: "Authorization"), "Bearer a1")        // pending tokens authenticate the list
-        guard case .workspaceRequired(let pending, let workspaces) = result else { return XCTFail("expected workspace picker") }
-        XCTAssertEqual(workspaces.map(\.slug), ["nationwide", "ama"])
-        XCTAssertTrue(store.load()?.isPending == true)
-        XCTAssertFalse(auth.isSignedIn)
-
-        let session = auth.selectWorkspace(pending, tenant: "Nationwide")
+        let auth = AuthService(client: tenantClient("Nationwide", firebase: firebase))
+        guard case .success(let session) = try await auth.login(email: "am@example.com", password: "pw") else { return XCTFail("expected success") }
         XCTAssertEqual(session.tenant, "nationwide")
-        XCTAssertEqual(store.load()?.tenant, "nationwide")
+        XCTAssertEqual(session.tenantId, 42); XCTAssertEqual(session.userPk, 7); XCTAssertEqual(session.roles, ["ADMIN"]); XCTAssertTrue(session.isAdmin)
+        XCTAssertEqual(session.accessExpiration, "2099-01-01T00:00:00Z")   // from the JWT exp claim
+        XCTAssertEqual(session.firebaseTenantId, "nationwide-x1y2z")
+        XCTAssertEqual(session.firebase?.idToken, "fb-id")
+        XCTAssertTrue(session.hasFirestore)
+        XCTAssertEqual(store.load(), session)
         XCTAssertTrue(auth.isSignedIn)
+        let fbReq = try XCTUnwrap(MockURLProtocol.requests.first { $0.url!.host == "identitytoolkit.googleapis.com" })
+        let body = try XCTUnwrap(fbReq.bodyData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        XCTAssertEqual(body["token"] as? String, "custom-1")
+        XCTAssertEqual(body["tenantId"] as? String, "nationwide-x1y2z")
+        XCTAssertEqual(body["returnSecureToken"] as? Bool, true)
+        let idToken = await auth.firebaseIdToken()
+        XCTAssertEqual(idToken, "fb-id")
     }
 
-    func testSingleWorkspaceSignsStraightIn() async throws {
+    func testFirebaseFailureIsToleratedAndNoFirebaseTenantSkipsStep3() async throws {
         store.clear()
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.protocolClasses = [MockURLProtocol.self]
-        let global = APIClient(config: ApiConfig(tenant: ""), tokenStore: store, urlSession: URLSession(configuration: cfg))
+        let firebase = FirebaseConfig(apiKey: "key-1", projectId: "proj")
         MockURLProtocol.handler = { req in
-            if req.url!.absoluteString.hasSuffix("/auth/login/") { return (200, Data(#"{"access":"a1","refresh":"r1"}"#.utf8)) }
-            return (200, Data(#"[{"slug":"nationwide","name":"Nationwide"}]"#.utf8))
+            if req.url!.host == "identitytoolkit.googleapis.com" { return (400, Data(#"{"error":{"message":"INVALID_CUSTOM_TOKEN"}}"#.utf8)) }
+            return (200, Data(#"{"access":"a1","refresh":"r1","firebase_custom_token":"custom-1","user":{"pk":1,"tenant_id":42,"firebase_tenant_id":"t-1"}}"#.utf8))
         }
-        guard case .success(let session) = try await AuthService(client: global).login(email: "am@example.com", password: "pw") else { return XCTFail("expected success") }
-        XCTAssertEqual(session.tenant, "nationwide")
+        guard case .success(let s1) = try await AuthService(client: tenantClient("demo", firebase: firebase)).login(email: "a@b.c", password: "pw") else { return XCTFail() }
+        XCTAssertNil(s1.firebase); XCTAssertEqual(s1.access, "a1"); XCTAssertFalse(s1.hasFirestore)
+
+        store.clear(); MockURLProtocol.requests = []
+        MockURLProtocol.handler = { _ in (200, Data(#"{"access":"a2","refresh":"r2","user":{"pk":1,"tenant_id":42,"firebase_tenant_id":null}}"#.utf8)) }
+        guard case .success(let s2) = try await AuthService(client: tenantClient("demo", firebase: firebase)).login(email: "a@b.c", password: "pw") else { return XCTFail() }
+        XCTAssertNil(s2.firebase)
+        XCTAssertEqual(MockURLProtocol.requests.count, 1)   // no Firebase call without a tenant
     }
 
-    func testLoginStoresSessionAndSecondFactorIsSurfaced() async throws {
+    func testPasswordResetAndMfaBlockTheSession() async throws {
         store.clear()
-        let me = try fixture("users_me")
-        MockURLProtocol.handler = { req in
-            if req.url!.absoluteString.hasSuffix("/auth/login/") { return (200, Data(#"{"access":"a1","refresh":"r1","access_expiration":"2099-01-01T00:00:00Z"}"#.utf8)) }
-            return (200, me)
-        }
-        let auth = AuthService(client: client)
-        guard case .success(let session) = try await auth.login(email: "user@example.com", password: "pw") else { return XCTFail("expected success") }
-        XCTAssertEqual(session.access, "a1")
-        XCTAssertEqual(store.load()?.refresh, "r1")
-        let loginReq = try XCTUnwrap(MockURLProtocol.requests.first)
-        XCTAssertEqual(loginReq.url?.absoluteString, "https://api-new.easyesuite.com/clients/demo/api/v1/auth/login/")
-        XCTAssertNil(loginReq.value(forHTTPHeaderField: "Authorization"))
-        let profile = try await auth.me()
-        XCTAssertEqual(profile.displayName, "Test Test")
-
-        store.clear()
-        MockURLProtocol.handler = { _ in (200, Data(#"{"mfa_required":true,"ephemeral_token":"eph-1"}"#.utf8)) }
-        guard case .secondFactorRequired(let token, _) = try await auth.login(email: "user@example.com", password: "pw") else { return XCTFail("expected 2fa") }
-        XCTAssertEqual(token, "eph-1")
+        MockURLProtocol.handler = { _ in (200, Data(#"{"access":"a1","refresh":"r1","user":{"pk":1,"email":"a@b.c","needs_password_reset":true}}"#.utf8)) }
+        guard case .passwordResetRequired(let email) = try await AuthService(client: tenantClient("demo")).login(email: "a@b.c", password: "pw") else { return XCTFail("expected reset") }
+        XCTAssertEqual(email, "a@b.c")
         XCTAssertNil(store.load())
+
+        MockURLProtocol.handler = { _ in (200, Data(#"{"access":"a1","refresh":"r1","user":{"pk":1,"is_mfa_enabled":true}}"#.utf8)) }
+        guard case .secondFactorRequired(let pending, _, _) = try await AuthService(client: tenantClient("demo")).login(email: "a@b.c", password: "pw") else { return XCTFail("expected 2fa") }
+        XCTAssertEqual(pending?.access, "a1")
+        XCTAssertNil(store.load())   // not stored until the code is verified
+
+        MockURLProtocol.handler = { _ in (200, Data(#"{"mfa_required":true,"ephemeral_token":"eph-1"}"#.utf8)) }
+        guard case .secondFactorRequired(let none, let token, _) = try await AuthService(client: tenantClient("demo")).login(email: "a@b.c", password: "pw") else { return XCTFail("expected 2fa") }
+        XCTAssertNil(none); XCTAssertEqual(token, "eph-1")
+    }
+
+    func testLoginNeedsAWorkspace() async {
+        do { _ = try await AuthService(client: globalClient()).login(email: "a@b.c", password: "pw"); XCTFail("expected an error") }
+        catch APIError.decoding(let msg, _) { XCTAssertTrue(msg.contains("workspace")) }
+        catch { XCTFail("unexpected \(error)") }
     }
 }

@@ -5,9 +5,20 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
-/** Gradle property, else environment variable, else "" — for build-time secrets that must not be committed. */
+/**
+ * Per-environment configuration that must not be committed (the repository is public): an untracked
+ * `android/easyesuite.properties` (see easyesuite.properties.example), else a Gradle property, else an
+ * environment variable, else "" (= production REST API, Firestore screens disabled).
+ */
+val envProps = java.util.Properties().apply {
+    val f = rootProject.file("easyesuite.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
 fun prop(gradleName: String, envName: String): String =
-    (project.findProperty(gradleName) as String?)?.trim() ?: System.getenv(envName)?.trim() ?: ""
+    envProps.getProperty(gradleName)?.trim()
+        ?: (project.findProperty(gradleName) as String?)?.trim()
+        ?: System.getenv(envName)?.trim()
+        ?: ""
 
 android {
     namespace = "com.easyesuite.app"
@@ -20,14 +31,13 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         vectorDrawables.useSupportLibrary = true
-        buildConfigField("String", "API_ROOT", "\"https://api-new.easyesuite.com/\"")
-        buildConfigField("String", "DEFAULT_TENANT", "\"\"")
-        // Firebase / Identity Platform sign-in (the backend expects a Firebase ID token as Bearer).
-        // Leave the key empty to use the backend-proxied auth/login/ flow instead. Supply via
-        //   -Peasyesuite.firebaseApiKey=... / -Peasyesuite.firebaseTenantId=...   or
-        //   EASYESUITE_FIREBASE_API_KEY / EASYESUITE_FIREBASE_TENANT_ID environment variables.
+        // Backend + Firebase configuration — see docs/API_MAP.md → Auth, Firebase. Empty API root = production.
+        // Base URL and Firebase config must come from the SAME environment; non-production builds stay internal.
+        buildConfigField("String", "API_ROOT", "\"${prop("easyesuite.apiRoot", "EASYESUITE_API_ROOT").ifBlank { "https://api-new.easyesuite.com/" }}\"")
         buildConfigField("String", "FIREBASE_API_KEY", "\"${prop("easyesuite.firebaseApiKey", "EASYESUITE_FIREBASE_API_KEY")}\"")
-        buildConfigField("String", "FIREBASE_TENANT_ID", "\"${prop("easyesuite.firebaseTenantId", "EASYESUITE_FIREBASE_TENANT_ID")}\"")
+        buildConfigField("String", "FIREBASE_PROJECT_ID", "\"${prop("easyesuite.firebaseProjectId", "EASYESUITE_FIREBASE_PROJECT_ID")}\"")
+        buildConfigField("String", "FIRESTORE_CONNECTOR_DB", "\"${prop("easyesuite.firestoreConnectorDb", "EASYESUITE_FIRESTORE_CONNECTOR_DB")}\"")
+        buildConfigField("String", "FIRESTORE_NOTIFICATIONS_DB", "\"${prop("easyesuite.firestoreNotificationsDb", "EASYESUITE_FIRESTORE_NOTIFICATIONS_DB")}\"")
     }
 
     buildTypes {

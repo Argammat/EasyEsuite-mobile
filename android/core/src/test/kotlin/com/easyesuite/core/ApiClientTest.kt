@@ -2,6 +2,7 @@ package com.easyesuite.core
 
 import com.easyesuite.core.auth.AuthService
 import com.easyesuite.core.auth.InMemoryTokenStore
+import com.easyesuite.core.auth.Jwt
 import com.easyesuite.core.auth.LoginResult
 import com.easyesuite.core.auth.Session
 import com.easyesuite.core.model.CreateItemRequest
@@ -151,73 +152,137 @@ class ApiClientTest {
         assertEquals("items/inventory_items/9/", Endpoints.itemDetail(9, null))
     }
 
-    @Test fun `expired access tokens are refreshed before the request`() = runTest {
+    @Test fun `expired access tokens are refreshed before the request and both tokens rotate`() = runTest {
         store.save(Session(tenant = "demo", access = "stale", refresh = "refresh-1", accessExpiration = "2020-01-01T00:00:00Z"))
-        server.enqueue(MockResponse().setBody("""{"access":"fresh","access_expiration":"2099-01-01T00:00:00Z"}"""))
+        server.enqueue(MockResponse().setBody("""{"access":"fresh","refresh":"refresh-2","access_expiration":"2099-01-01T00:00:00Z"}"""))
         server.enqueue(MockResponse().setBody(Fixtures.read("warehouses.json")))
         val page: Page<com.easyesuite.core.model.Warehouse> = client.get("items/warehouses/")
         assertEquals(3, page.results.size)
         assertEquals("/clients/demo/api/v1/auth/token/refresh/", server.takeRequest().path)
         assertEquals("Bearer fresh", server.takeRequest().getHeader("Authorization"))
         assertEquals("fresh", store.load()!!.access)
+        assertEquals("refresh-2", store.load()!!.refresh)   // each refresh token works once: the new one must be kept
     }
 
-    @Test fun `login stores a session and me() decodes`() = runTest {
-        store.clear()
-        server.enqueue(MockResponse().setBody("""{"access":"a1","refresh":"r1","access_expiration":"2099-01-01T00:00:00Z","refresh_expiration":"2099-01-08T00:00:00Z","user":{"pk":1}}"""))
-        server.enqueue(MockResponse().setBody(Fixtures.read("users_me.json")))
-        val auth = AuthService(client)
-        val result = auth.login("user@example.com", "pw")
-        assertTrue(result is LoginResult.Success)
-        assertEquals("a1", store.load()!!.access)
-        assertEquals("r1", store.load()!!.refresh)
-        val loginReq = server.takeRequest()
-        assertEquals("/clients/demo/api/v1/auth/login/", loginReq.path)
-        assertNull(loginReq.getHeader("Authorization"))
-        assertEquals("""{"email":"user@example.com","password":"pw"}""", loginReq.body.readUtf8())
-        assertEquals("Test Test", auth.me().displayName)
+    @Test fun `older sessions still decode`() {
+        val s = DefaultJson.decodeFromString(Session.serializer(), """{"tenant":"demo","access":"a","refresh":"r","email":"x@y.z","provider":"backend"}""")
+        assertNull(s.firebaseTenantId)
+        assertTrue(s.roles.isEmpty())
+        assertFalse(s.hasFirestore)
+        assertFalse(s.isAccessExpiring())
     }
 
-    @Test fun `email-password login without a tenant leads to the workspace picker`() = runTest {
-        store.clear()
-        val global = ApiClient(ApiConfig(tenant = "", apiRoot = server.url("/").toString()), store)
-        server.enqueue(MockResponse().setBody("""{"access":"a1","refresh":"r1","access_expiration":"2099-01-01T00:00:00Z"}"""))
-        server.enqueue(MockResponse().setBody("""{"results":[{"slug":"nationwide","display_name":"Nationwide"},{"slug":"ama","display_name":"AMA invesment Group LLC"}]}"""))
-        val auth = AuthService(global)
-        val result = auth.login("am@example.com", "pw")
-        assertEquals("/api/v1/auth/login/", server.takeRequest().path)          // global root — no tenant yet
-        val tenants = server.takeRequest()
-        assertEquals("/api/v1/users/me/tenants/", tenants.path)
-        assertEquals("Bearer a1", tenants.getHeader("Authorization"))             // pending tokens authenticate the list
-        assertTrue(result is LoginResult.WorkspaceRequired)
-        val choose = result as LoginResult.WorkspaceRequired
-        assertEquals(listOf("nationwide", "ama"), choose.workspaces.map { it.slug })
-        assertTrue(store.load()!!.isPending)
-        assertFalse(auth.isSignedIn)
-
-        val session = auth.selectWorkspace(choose.pending, "Nationwide")
-        assertEquals("nationwide", session.tenant)
-        assertEquals("nationwide", store.load()!!.tenant)
-        assertTrue(auth.isSignedIn)
+    /** A JWT whose payload carries `exp` (no signature check; only the claim is read). */
+    private fun jwt(exp: Long): String {
+        val b64 = { bytes: ByteArray -> java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes) }
+        return b64("""{"alg":"HS256"}""".toByteArray()) + "." + b64("""{"exp":$exp,"token_type":"access"}""".toByteArray()) + ".sig"
     }
 
-    @Test fun `a single workspace signs straight in`() = runTest {
-        store.clear()
-        val global = ApiClient(ApiConfig(tenant = "", apiRoot = server.url("/").toString()), store)
-        server.enqueue(MockResponse().setBody("""{"access":"a1","refresh":"r1","access_expiration":"2099-01-01T00:00:00Z"}"""))
-        server.enqueue(MockResponse().setBody("""[{"slug":"nationwide","name":"Nationwide"}]"""))
-        val result = AuthService(global).login("am@example.com", "pw")
-        assertTrue(result is LoginResult.Success)
-        assertEquals("nationwide", (result as LoginResult.Success).session.tenant)
+    @Test fun `access expiry falls back to the JWT exp claim`() {
+        val token = jwt(4070908800)   // 2099-01-01T00:00:00Z
+        assertEquals(java.time.Instant.ofEpochSecond(4070908800), Jwt.expiration(token))
+        assertEquals("2099-01-01T00:00:00Z", Jwt.expirationIso(token))
+        assertNull(Jwt.expiration("not-a-jwt"))
     }
 
-    @Test fun `login surfaces a second-factor challenge`() = runTest {
+    private fun globalClient() = ApiClient(ApiConfig(tenant = "", apiRoot = server.url("/").toString()), store)
+    private fun tenantClient(tenant: String, firebase: FirebaseConfig? = null) =
+        ApiClient(ApiConfig(tenant = tenant, apiRoot = server.url("/").toString(), firebase = firebase), store)
+    private fun firebaseOnMock() = FirebaseConfig(
+        apiKey = "key-1", projectId = "proj", connectorDatabase = "connector-db", notificationsDatabase = "notifications-db",
+        identityToolkitBase = server.url("/").toString(), secureTokenBase = server.url("/").toString(), firestoreBase = server.url("/").toString(),
+    )
+
+    /** Step 1 — `POST api/v1/auth/login/tenants/` lists the workspaces and never returns a token. */
+    @Test fun `workspaces are listed from the global root without a token`() = runTest {
         store.clear()
-        server.enqueue(MockResponse().setBody("""{"mfa_required":true,"ephemeral_token":"eph-1","detail":"Enter the code from your authenticator"}"""))
-        val result = AuthService(client).login("user@example.com", "pw")
-        assertTrue(result is LoginResult.SecondFactorRequired)
-        assertEquals("eph-1", (result as LoginResult.SecondFactorRequired).challengeToken)
+        server.enqueue(MockResponse().setBody("""[{"tenant_id":42,"schema_name":"nationwide","display_name":"Nationwide","company_name":"Nationwide","logo_url":null,"initials":"NW","last_active_at":"2026-10-08T14:03:11Z"},{"tenant_id":7,"schema_name":"ama","display_name":"AMA Investment Group LLC"}]"""))
+        val list = AuthService(globalClient()).workspaces(" am@example.com ", "pw")
+        assertEquals(listOf("nationwide", "ama"), list.map { it.schemaName })
+        assertEquals("Nationwide", list[0].name); assertEquals("NW", list[0].monogram); assertEquals(42, list[0].tenantId)
+        assertEquals("AM", list[1].monogram)
+        val req = server.takeRequest()
+        assertEquals("/api/v1/auth/login/tenants/", req.path)
+        assertNull(req.getHeader("Authorization"))
+        assertEquals("""{"email":"am@example.com","password":"pw"}""", req.body.readUtf8())
         assertNull(store.load())
+    }
+
+    @Test fun `wrong password and rate limit become friendly errors`() = runTest {
+        store.clear()
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"errors":{"detail":"Unable to log in with provided credentials."}}"""))
+        try { AuthService(globalClient()).workspaces("a@b.c", "x"); fail("expected 401") }
+        catch (e: ApiException.Http) { assertEquals(401, e.status); assertEquals("Email or password is incorrect.", e.detail) }
+        server.enqueue(MockResponse().setResponseCode(429))
+        try { AuthService(globalClient()).workspaces("a@b.c", "x"); fail("expected 429") }
+        catch (e: ApiException.Http) { assertEquals(429, e.status); assertTrue(e.detail.contains("Too many")) }
+    }
+
+    /** Step 2 + 3 — tenant login stores the JWTs (expiry from the JWT when the body omits it) and exchanges the custom token. */
+    @Test fun `tenant login stores tokens and signs in to Firebase with the custom token`() = runTest {
+        store.clear()
+        val access = jwt(4070908800)
+        server.enqueue(MockResponse().setBody("""{"access":"$access","refresh":"r1","firebase_custom_token":"custom-1","user":{"pk":7,"email":"am@example.com","tenant_id":42,"firebase_tenant_id":"nationwide-x1y2z","is_mfa_enabled":false,"is_mfa_mandatory":false,"needs_password_reset":false,"all_role_names":["ADMIN"],"plan_name":"Pro"}}"""))
+        server.enqueue(MockResponse().setBody("""{"idToken":"fb-id","refreshToken":"fb-refresh","expiresIn":"3600"}"""))
+        val auth = AuthService(tenantClient("Nationwide", firebaseOnMock()))
+        val result = auth.login("am@example.com", "pw")
+        assertTrue(result is LoginResult.Success)
+        val session = (result as LoginResult.Success).session
+        assertEquals("nationwide", session.tenant)
+        assertEquals(42, session.tenantId); assertEquals(7, session.userPk); assertEquals(listOf("ADMIN"), session.roles); assertTrue(session.isAdmin)
+        assertEquals("2099-01-01T00:00:00Z", session.accessExpiration)   // from the JWT exp claim
+        assertEquals("nationwide-x1y2z", session.firebaseTenantId)
+        assertEquals("fb-id", session.firebase?.idToken)
+        assertTrue(session.hasFirestore)
+        assertEquals(session, store.load())
+        assertTrue(auth.isSignedIn)
+        assertEquals("/clients/nationwide/api/v1/auth/login/", server.takeRequest().path)
+        val fbReq = server.takeRequest()
+        assertEquals("/v1/accounts:signInWithCustomToken?key=key-1", fbReq.path)
+        val body = DefaultJson.parseToJsonElement(fbReq.body.readUtf8()).jsonObject
+        assertEquals("custom-1", body["token"]!!.jsonPrimitive.content)
+        assertEquals("nationwide-x1y2z", body["tenantId"]!!.jsonPrimitive.content)
+        assertTrue(body["returnSecureToken"]!!.jsonPrimitive.boolean)
+        assertEquals("fb-id", auth.firebaseIdToken())
+    }
+
+    @Test fun `firebase failure is tolerated and no firebase tenant skips step 3`() = runTest {
+        store.clear()
+        server.enqueue(MockResponse().setBody("""{"access":"a1","refresh":"r1","firebase_custom_token":"custom-1","user":{"pk":1,"tenant_id":42,"firebase_tenant_id":"t-1"}}"""))
+        server.enqueue(MockResponse().setResponseCode(400).setBody("""{"error":{"message":"INVALID_CUSTOM_TOKEN"}}"""))
+        val s1 = (AuthService(tenantClient("demo", firebaseOnMock())).login("a@b.c", "pw") as LoginResult.Success).session
+        assertNull(s1.firebase); assertEquals("a1", s1.access); assertFalse(s1.hasFirestore)
+        server.takeRequest(); server.takeRequest()
+
+        store.clear()
+        server.enqueue(MockResponse().setBody("""{"access":"a2","refresh":"r2","user":{"pk":1,"tenant_id":42,"firebase_tenant_id":null}}"""))
+        val s2 = (AuthService(tenantClient("demo", firebaseOnMock())).login("a@b.c", "pw") as LoginResult.Success).session
+        assertNull(s2.firebase)
+        assertEquals(1, server.requestCount - 2)   // no Firebase call without a tenant
+    }
+
+    @Test fun `password reset and MFA block the session`() = runTest {
+        store.clear()
+        server.enqueue(MockResponse().setBody("""{"access":"a1","refresh":"r1","user":{"pk":1,"email":"a@b.c","needs_password_reset":true}}"""))
+        val reset = AuthService(tenantClient("demo")).login("a@b.c", "pw")
+        assertTrue(reset is LoginResult.PasswordResetRequired)
+        assertEquals("a@b.c", (reset as LoginResult.PasswordResetRequired).email)
+        assertNull(store.load())
+
+        server.enqueue(MockResponse().setBody("""{"access":"a1","refresh":"r1","user":{"pk":1,"is_mfa_enabled":true}}"""))
+        val mfa = AuthService(tenantClient("demo")).login("a@b.c", "pw")
+        assertTrue(mfa is LoginResult.SecondFactorRequired)
+        assertEquals("a1", (mfa as LoginResult.SecondFactorRequired).pending?.access)
+        assertNull(store.load())   // not stored until the code is verified
+
+        server.enqueue(MockResponse().setBody("""{"mfa_required":true,"ephemeral_token":"eph-1","detail":"Enter the code from your authenticator"}"""))
+        val challenge = AuthService(tenantClient("demo")).login("a@b.c", "pw") as LoginResult.SecondFactorRequired
+        assertNull(challenge.pending); assertEquals("eph-1", challenge.challengeToken)
+    }
+
+    @Test fun `login needs a workspace`() = runTest {
+        try { AuthService(globalClient()).login("a@b.c", "pw"); fail("expected an error") }
+        catch (e: ApiException.Decoding) { assertTrue(e.message!!.contains("workspace")) }
     }
 
     @Test fun `assistant replies are parsed leniently`() {

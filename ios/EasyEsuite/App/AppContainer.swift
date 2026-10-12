@@ -2,20 +2,16 @@ import Foundation
 import Combine
 import EasyEsuiteKit
 
-/// One object graph per signed-in tenant. The API client is rebuilt on login/logout because the
-/// tenant is part of every URL.
+/// One object graph per signed-in workspace. The API client is rebuilt on login/logout because the
+/// workspace's `schema_name` is part of every URL.
 @MainActor
 final class AppContainer: ObservableObject {
     @Published private(set) var session: Session?
+    /// "Switch workspace" from Settings: the login screen is shown over the app while the current session stays valid.
+    @Published private(set) var switchingWorkspace = false
 
     let tokenStore = KeychainTokenStore()
     private(set) var graph: Graph?
-
-    /// True when this build signs in against Firebase / Identity Platform (see `AppConfig`).
-    var firebaseSignIn: Bool { AppConfig.firebaseApiKey != nil }
-
-    /// Set by `switchWorkspace()`: the login screen opens straight on the workspace picker with these tokens.
-    private(set) var pendingSwitch: Session?
 
     final class Graph {
         let tenant: String
@@ -27,82 +23,89 @@ final class AppContainer: ObservableObject {
         let shipping: ShippingRepository
         let reports: ReportsRepository
         let assistant: AssistantRepository
+        /// Firestore-backed data (Copilot conversations, connector status) — nil when the build has no Firebase config.
+        let firestoreConnector: FirestoreClient?
+        /// In-app notifications — nil when the build has no Firebase config.
+        let firestoreNotifications: FirestoreClient?
 
-        init(tenant: String, firebaseTenantId: String?, tokenStore: TokenStore, onExpired: @escaping @Sendable () -> Void) {
+        init(tenant: String, tokenStore: TokenStore, onExpired: @escaping @Sendable () -> Void) {
             self.tenant = tenant
-            let firebase = AppConfig.firebaseApiKey.map { FirebaseConfig(apiKey: $0, tenantId: firebaseTenantId ?? AppConfig.firebaseTenantId) }
-            client = APIClient(config: ApiConfig(tenant: tenant, apiRoot: AppConfig.apiRoot, firebase: firebase), tokenStore: tokenStore)
-            client.onSessionExpired = onExpired
-            auth = AuthService(client: client)
-            items = ItemsRepository(client: client)
-            inventory = InventoryRepository(client: client)
-            orders = OrdersRepository(client: client)
-            shipping = ShippingRepository(client: client)
-            reports = ReportsRepository(client: client)
-            assistant = AssistantRepository(client: client)
+            let firebase = AppConfig.firebase
+            let apiClient = APIClient(config: ApiConfig(tenant: tenant, apiRoot: AppConfig.apiRoot, firebase: firebase), tokenStore: tokenStore)
+            apiClient.onSessionExpired = onExpired
+            let authService = AuthService(client: apiClient)
+            client = apiClient
+            auth = authService
+            items = ItemsRepository(client: apiClient)
+            inventory = InventoryRepository(client: apiClient)
+            orders = OrdersRepository(client: apiClient)
+            shipping = ShippingRepository(client: apiClient)
+            reports = ReportsRepository(client: apiClient)
+            assistant = AssistantRepository(client: apiClient)
+            // Locals, not `self.`: a closure must not capture self before every stored property is set.
+            firestoreConnector = firebase.map { FirestoreClient(config: $0, database: $0.connectorDatabase, auth: authService, urlSession: apiClient.urlSession) }
+            firestoreNotifications = firebase.map { FirestoreClient(config: $0, database: $0.notificationsDatabase, auth: authService, urlSession: apiClient.urlSession) }
         }
     }
 
     init() {
-        // A session whose workspace is still to be chosen never counts as signed in (and is dropped on launch).
-        if let stored = tokenStore.load() {
-            if stored.isPending { tokenStore.clear() } else { session = stored }
-        }
-        if let s = session { graph = makeGraph(tenant: s.tenant, firebaseTenantId: s.firebaseTenantId) }
+        if let stored = tokenStore.load(), !stored.tenant.isEmpty { session = stored }
+        if let s = session { graph = makeGraph(tenant: s.tenant) }
     }
 
-    /// A graph for signing in. With a blank tenant the auth calls go to the global root (email + password first,
-    /// workspace afterwards); with a tenant they are scoped to that workspace.
-    func makeGraph(tenant: String = "", firebaseTenantId: String? = nil) -> Graph {
-        Graph(tenant: tenant, firebaseTenantId: firebaseTenantId, tokenStore: tokenStore) { [weak self] in
+    /// A graph for signing in: blank tenant = the global root (step 1, listing workspaces); a `schema_name` = that
+    /// workspace (step 2, the actual login).
+    func makeGraph(tenant: String = "") -> Graph {
+        Graph(tenant: tenant, tokenStore: tokenStore) { [weak self] in
             Task { @MainActor in self?.signOut() }
         }
     }
 
-    /// Graph for the active tenant; only valid while signed in.
+    /// Graph for the active workspace; only valid while signed in.
     func require() -> Graph { graph! }
 
     func signedIn(_ session: Session) {
         tokenStore.lastTenant = session.tenant
         tokenStore.lastEmail = session.email
-        pendingSwitch = nil
-        graph = makeGraph(tenant: session.tenant, firebaseTenantId: session.firebaseTenantId)
+        graph = makeGraph(tenant: session.tenant)
+        switchingWorkspace = false
         self.session = session
     }
 
-    /// Keep the tokens, drop the workspace: the login screen shows the picker again.
-    func switchWorkspace() {
-        guard var current = session else { return }
-        current.tenant = ""
-        pendingSwitch = current
-        graph = nil
-        session = nil
-    }
+    /// Keep the current workspace until the new login succeeds; the login screen asks for the password again
+    /// (the backend's login is per workspace, and the app never stores the password).
+    func switchWorkspace() { switchingWorkspace = true }
+    func cancelWorkspaceSwitch() { switchingWorkspace = false }
 
-    /// Backing out of a workspace switch: restore the previous workspace without re-authenticating.
-    func cancelWorkspaceSwitch() {
-        guard var pending = pendingSwitch, let previous = tokenStore.lastTenant else { return }
-        pending.tenant = previous
-        signedIn(pending)
-    }
-
+    /// Delete both JWTs and the Firebase tokens; nothing is cached locally beyond that.
     func signOut() {
         tokenStore.clear()
-        pendingSwitch = nil
+        switchingWorkspace = false
         graph = nil
         session = nil
     }
 }
 
-/// Build-time configuration, read from Info.plist (set the keys in project.yml / xcconfig; never commit real values):
-///  - `EasyEsuiteAPIRoot`            — defaults to the production API host
-///  - `EasyEsuiteFirebaseAPIKey`     — Firebase web API key; empty = backend-proxied `auth/login/` flow
-///  - `EasyEsuiteFirebaseTenantId`   — Identity Platform tenant id for single-tenant builds (optional)
+/// Build-time configuration, read from Info.plist (filled from build settings in project.yml; the real
+/// values for each environment live in an untracked `ios/Config/Environment.local.xcconfig` or in CI secrets —
+/// never in git, the repository is public):
+///  - `EasyEsuiteAPIRoot`                 — defaults to the production API host
+///  - `EasyEsuiteFirebaseAPIKey`          — Firebase web API key of the same environment
+///  - `EasyEsuiteFirebaseProjectId`       — Firebase project id
+///  - `EasyEsuiteFirestoreConnectorDB`    — named Firestore database with Copilot / connector data
+///  - `EasyEsuiteFirestoreNotificationsDB`— named Firestore database with in-app notifications
+/// Without the Firebase keys the app works REST-only (Copilot history / notifications unavailable).
 enum AppConfig {
     private static func string(_ key: String) -> String? {
         (Bundle.main.object(forInfoDictionaryKey: key) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
     }
     static var apiRoot: URL { string("EasyEsuiteAPIRoot").flatMap(URL.init(string:)) ?? ApiConfig.defaultApiRoot }
-    static var firebaseApiKey: String? { string("EasyEsuiteFirebaseAPIKey") }
-    static var firebaseTenantId: String? { string("EasyEsuiteFirebaseTenantId") }
+    static var firebase: FirebaseConfig? {
+        guard let key = string("EasyEsuiteFirebaseAPIKey"), let project = string("EasyEsuiteFirebaseProjectId") else { return nil }
+        return FirebaseConfig(apiKey: key, projectId: project,
+                              connectorDatabase: string("EasyEsuiteFirestoreConnectorDB") ?? "(default)",
+                              notificationsDatabase: string("EasyEsuiteFirestoreNotificationsDB") ?? "(default)")
+    }
+    static var environmentName: String { ApiConfig(tenant: "", apiRoot: apiRoot).environmentName }
+    static var hasFirebase: Bool { firebase != nil }
 }

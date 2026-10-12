@@ -1,0 +1,7 @@
+# Copy to android/easyesuite.properties (git-ignored) and fill in ONE environment's values from the backend
+# team's "Mobile App — API Integration Answers" document. Base URL and Firebase config must match.
+easyesuite.apiRoot=https://stg-api.easyesuite.com/
+easyesuite.firebaseApiKey=AIza...
+easyesuite.firebaseProjectId=your-firebase-project-id
+easyesuite.firestoreConnectorDb=connector-db-stg
+easyesuite.firestoreNotificationsDb=notifications-db-stg

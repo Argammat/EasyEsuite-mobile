@@ -94,9 +94,17 @@ fun SettingsScreen(graph: AppContainer.Graph, nav: NavHostController, container:
             SectionTitle("Signed in as")
             KeyValueRow("Name", profile?.displayName)
             KeyValueRow("Email", profile?.email ?: container.session.value?.email)
-            KeyValueRow("Role", profile?.groups?.joinToString { it.name }?.ifBlank { null } ?: if (profile?.isSuperuser == true) "Superuser" else null)
+            KeyValueRow("Role", profile?.groups?.joinToString { it.name }?.ifBlank { null } ?: container.session.value?.roles?.joinToString()?.ifBlank { null })
             KeyValueRow("Workspace", graph.tenant)
-            KeyValueRow("API", BuildConfig.API_ROOT)
+            KeyValueRow("Environment", AppContainer.environmentName)
+            KeyValueRow(
+                "Live data",
+                when {
+                    container.session.value?.hasFirestore == true -> "Connected"
+                    AppContainer.firebaseConfig != null -> "Unavailable for this workspace"
+                    else -> "Not configured in this build"
+                },
+            )
             KeyValueRow("App version", BuildConfig.VERSION_NAME)
             if (error != null) Text(error!!, color = MaterialTheme.colorScheme.error)
             Spacer(Modifier.height(24.dp))

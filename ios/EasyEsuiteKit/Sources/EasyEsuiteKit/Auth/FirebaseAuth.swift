@@ -1,6 +1,6 @@
 import Foundation
 
-/// Tokens minted by Identity Platform. `idToken` is what the API wants as `Authorization: Bearer`.
+/// Tokens minted by Identity Platform. `idToken` is the Bearer for Firestore; the REST API never sees it.
 public struct FirebaseTokens: Equatable, Sendable {
     public var idToken: String
     public var refreshToken: String
@@ -8,11 +8,13 @@ public struct FirebaseTokens: Equatable, Sendable {
     public var localId: String?
 
     public var expiresAtIso: String { DateText.iso8601(expiresAt) }
+    public var session: FirebaseSession { FirebaseSession(idToken: idToken, refreshToken: refreshToken, expiresAt: expiresAtIso) }
 }
 
-/// Minimal Firebase Identity Platform client (REST, no SDK) — email/password sign-in against the
-/// workspace's tenant plus refresh-token exchange. Errors are mapped to the same `APIError` family the
-/// rest of the kit throws so the UI needs no special cases.
+/// Minimal Firebase Identity Platform client (REST, no SDK). The backend's tenant login returns a
+/// `firebase_custom_token`; this exchanges it for an ID token (`accounts:signInWithCustomToken`, with the
+/// workspace's Identity Platform tenant set) and renews it with the refresh token. There is deliberately no
+/// email/password sign-in: the Firebase users have no passwords (backend team, 2026-10-09).
 public final class FirebaseAuth: @unchecked Sendable {
     public let config: FirebaseConfig
     private let session: URLSession
@@ -22,9 +24,8 @@ public final class FirebaseAuth: @unchecked Sendable {
         self.session = urlSession
     }
 
-    private struct SignInRequest: Encodable {
-        var email: String
-        var password: String
+    private struct CustomTokenRequest: Encodable {
+        var token: String
         var returnSecureToken = true
         var tenantId: String?
     }
@@ -34,7 +35,6 @@ public final class FirebaseAuth: @unchecked Sendable {
         var refreshToken: String?
         var expiresIn: String?
         var localId: String?
-        var mfaPendingCredential: String?
     }
 
     private struct RefreshResponse: Decodable {
@@ -44,16 +44,12 @@ public final class FirebaseAuth: @unchecked Sendable {
         var user_id: String?
     }
 
-    /// `accounts:signInWithPassword` — `{email, password, returnSecureToken, tenantId}`.
-    public func signIn(email: String, password: String) async throws -> FirebaseTokens {
-        let body = SignInRequest(email: email.trimmingCharacters(in: .whitespaces), password: password, tenantId: config.tenantId)
-        let encoder = JSONEncoder()   // Firebase keys are camelCase — no snake_case strategy here.
-        let (status, data) = try await send(config.signInURL, body: try encoder.encode(body), contentType: "application/json")
+    /// Step 3 of sign-in. `tenantId` must be set before signing in (it is sent with the request).
+    public func signIn(customToken: String, tenantId: String?) async throws -> FirebaseTokens {
+        let body = CustomTokenRequest(token: customToken, tenantId: tenantId?.nilIfBlank)
+        let (status, data) = try await send(config.customTokenSignInURL, body: try JSONEncoder().encode(body), contentType: "application/json")   // Firebase keys are camelCase
         guard (200..<300).contains(status) else { throw FirebaseAuth.mapError(status: status, data: data) }
         let res = try JSONDecoder().decode(SignInResponse.self, from: data)
-        if res.mfaPendingCredential != nil, res.idToken == nil {
-            throw APIError.http(status: 401, detail: "This account requires a second factor, which the mobile app does not support yet. Sign in on the web to manage it.", body: nil)
-        }
         guard let idToken = res.idToken else { throw APIError.decoding("Firebase sign-in returned no idToken", body: String(data: data, encoding: .utf8)) }
         let seconds = TimeInterval(res.expiresIn ?? "") ?? 3600
         return FirebaseTokens(idToken: idToken, refreshToken: res.refreshToken ?? "", expiresAt: Date().addingTimeInterval(seconds), localId: res.localId)
@@ -86,19 +82,18 @@ public final class FirebaseAuth: @unchecked Sendable {
         }
     }
 
-    /// Firebase error envelope: `{"error":{"code":400,"message":"INVALID_PASSWORD",...}}` → a sentence the user can act on.
+    /// Firebase error envelope: `{"error":{"code":400,"message":"INVALID_CUSTOM_TOKEN",...}}` → a sentence the user can act on.
     static func mapError(status: Int, data: Data) -> APIError {
         let code = (try? JSONDecoder().decode(JSONValue.self, from: data))?["error"]?["message"]?.stringValue ?? ""
         let base = code.split(separator: " ").first.map(String.init) ?? code
         let detail: String
         switch base {
-        case "INVALID_PASSWORD", "INVALID_LOGIN_CREDENTIALS", "EMAIL_NOT_FOUND", "INVALID_EMAIL": detail = "Email or password is incorrect."
-        case "USER_DISABLED": detail = "This account has been disabled."
+        case "INVALID_CUSTOM_TOKEN", "CREDENTIAL_MISMATCH": detail = "The Firebase sign-in token was rejected (project mismatch)."
+        case "TENANT_ID_MISMATCH", "INVALID_TENANT_ID", "MISSING_TENANT_ID": detail = "This workspace's Firebase tenant is not configured."
+        case "TOKEN_EXPIRED", "INVALID_REFRESH_TOKEN", "USER_NOT_FOUND", "USER_DISABLED": detail = "The Firebase session has expired. Sign in again to refresh it."
         case "TOO_MANY_ATTEMPTS_TRY_LATER": detail = "Too many attempts. Try again in a few minutes."
-        case "TENANT_ID_MISMATCH", "INVALID_TENANT_ID", "MISSING_TENANT_ID": detail = "This email does not belong to that workspace."
-        case "TOKEN_EXPIRED", "INVALID_REFRESH_TOKEN", "USER_NOT_FOUND": detail = "Your session has expired. Please sign in again."
         case "API_KEY_INVALID", "INVALID_API_KEY": detail = "The app's Firebase configuration is invalid."
-        default: detail = code.isEmpty ? "Sign-in failed (HTTP \(status))." : "Sign-in failed: \(code)"
+        default: detail = code.isEmpty ? "Firebase sign-in failed (HTTP \(status))." : "Firebase sign-in failed: \(code)"
         }
         return APIError.http(status: status, detail: detail, body: String(data: data, encoding: .utf8))
     }

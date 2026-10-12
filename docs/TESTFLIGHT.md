@@ -58,8 +58,11 @@ lines the script printed:
 | `DIST_CERT_P12_BASE64` / `DIST_CERT_PASSWORD` | from `asc-out/github-secrets.txt` |
 | `PROVISIONING_PROFILE_BASE64` | from `asc-out/github-secrets.txt` |
 
-Optional *variables* (`vars.`): `EASYESUITE_API_ROOT` (defaults to production), `EASYESUITE_FIREBASE_TENANT_ID`;
-optional secret `EASYESUITE_FIREBASE_API_KEY` if the team switches sign-in to Firebase (see `API_MAP.md` → Auth).
+Optional, for the Firestore-backed screens (Copilot history, notifications) — the **production** Firebase values from
+the backend team's answers doc, as secrets: `EASYESUITE_FIREBASE_API_KEY`, `EASYESUITE_FIREBASE_PROJECT_ID`,
+`EASYESUITE_FIRESTORE_CONNECTOR_DB`, `EASYESUITE_FIRESTORE_NOTIFICATIONS_DB`. Without them the build is REST-only.
+Variable `EASYESUITE_API_ROOT` overrides the API host (leave unset for production; a staging build must use staging
+Firebase values too and stays on internal testing).
 
 ### 5. Ship a build
 

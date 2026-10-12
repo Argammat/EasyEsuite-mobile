@@ -29,14 +29,23 @@ public final class ItemsRepository: @unchecked Sendable {
         }
     }
 
-    /// `items/{type}/{id}/history/` — stock movements for the item (shape decoded leniently, bad rows skipped).
-    public func history(_ id: Int64, type: String?, page: PageQuery = PageQuery(limit: 50)) async throws -> [ItemHistoryEntry] {
-        let raw: JSONValue = try await client.get(Endpoints.itemHistory(id, type: type), query: page.query)
-        let rows = raw.arrayValue ?? raw["results"]?.arrayValue ?? []
-        return rows.compactMap { row in
-            guard let data = try? JSONEncoder().encode(row) else { return nil }
-            return try? client.decoder.decode(ItemHistoryEntry.self, from: data)
+    /// `items/{type}/{id}/history/` — the item's audit log, paginated (`limit`/`offset`), newest first.
+    /// Tolerates the plain-array shape the OpenAPI file documents in case an older environment still returns it.
+    public func history(_ id: Int64, type: String?, filter: HistoryFilter = HistoryFilter(), page: PageQuery = PageQuery(limit: 25)) async throws -> Page<ItemAuditEntry> {
+        let raw: JSONValue = try await client.get(Endpoints.itemHistory(id, type: type), query: page.query.merging(filter.query) { $1 })
+        let rows: [JSONValue]
+        var result = Page<ItemAuditEntry>()
+        if let arr = raw.arrayValue {
+            rows = arr; result.count = arr.count
+        } else {
+            rows = raw["results"]?.arrayValue ?? []
+            result.count = Int(raw["count"]?.doubleValue ?? Double(rows.count))
+            result.next = raw["next"]?.stringValue
+            result.previous = raw["previous"]?.stringValue
         }
+        let enc = JSONEncoder()
+        result.results = rows.compactMap { row in (try? enc.encode(row)).flatMap { try? client.decoder.decode(ItemAuditEntry.self, from: $0) } }
+        return result
     }
 
     public func conditions() async throws -> [ItemCondition] {

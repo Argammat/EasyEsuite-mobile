@@ -8,6 +8,7 @@ import com.easyesuite.core.FirebaseConfig
 import com.easyesuite.core.auth.AuthService
 import com.easyesuite.core.auth.Session
 import com.easyesuite.core.net.ApiClient
+import com.easyesuite.core.net.FirestoreClient
 import com.easyesuite.core.repo.AssistantRepository
 import com.easyesuite.core.repo.InventoryRepository
 import com.easyesuite.core.repo.ItemsRepository
@@ -20,8 +21,8 @@ import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 
 /**
- * Hand-rolled DI: one graph per signed-in tenant. The API client is rebuilt when the tenant
- * changes (login/logout) because the tenant is part of every URL.
+ * Hand-rolled DI: one graph per signed-in workspace. The API client is rebuilt when the workspace
+ * changes (login/logout) because its `schema_name` is part of every URL.
  */
 class AppContainer(context: Context) {
 
@@ -29,32 +30,23 @@ class AppContainer(context: Context) {
 
     private val okHttp: OkHttpClient = OkHttpClient.Builder().apply {
         if (BuildConfig.DEBUG) {
+            // BASIC logs method + URL + status only — never headers or bodies (tokens must not reach logcat).
             addInterceptor(HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC })
         }
     }.build()
 
-    /** True when this build signs in against Firebase / Identity Platform (see app/build.gradle.kts). */
-    val firebaseSignIn: Boolean get() = BuildConfig.FIREBASE_API_KEY.isNotBlank()
-
-    /** A session whose workspace is still to be chosen never counts as signed in (and is dropped on launch). */
-    private val _session = MutableStateFlow(restoredSession())
     /** Null = signed out. Observed by the root composable to switch between login and the app. */
+    private val _session = MutableStateFlow(tokenStore.load()?.takeIf { it.tenant.isNotBlank() })
     val session: StateFlow<Session?> = _session
 
-    /** Set by [switchWorkspace]: the login screen opens straight on the workspace picker with these tokens. */
-    @Volatile var pendingSwitch: Session? = null
-        private set
+    /** "Switch workspace" from Settings: the login screen is shown over the app while the current session stays valid. */
+    private val _switchingWorkspace = MutableStateFlow(false)
+    val switchingWorkspace: StateFlow<Boolean> = _switchingWorkspace
 
-    @Volatile private var graph: Graph? = _session.value?.let { Graph(it.tenant, it.firebaseTenantId) }
+    @Volatile private var graph: Graph? = _session.value?.let { Graph(it.tenant) }
 
-    inner class Graph(val tenant: String, firebaseTenantId: String? = null) {
-        val config = ApiConfig(
-            tenant = tenant,
-            apiRoot = BuildConfig.API_ROOT,
-            firebase = BuildConfig.FIREBASE_API_KEY.takeIf { it.isNotBlank() }?.let { key ->
-                FirebaseConfig(apiKey = key, tenantId = firebaseTenantId ?: BuildConfig.FIREBASE_TENANT_ID.takeIf { it.isNotBlank() })
-            },
-        )
+    inner class Graph(val tenant: String) {
+        val config = ApiConfig(tenant = tenant, apiRoot = BuildConfig.API_ROOT, firebase = firebaseConfig)
         val client = ApiClient(
             config = config,
             tokenStore = tokenStore,
@@ -68,51 +60,57 @@ class AppContainer(context: Context) {
         val shipping = ShippingRepository(client)
         val reports = ReportsRepository(client)
         val assistant = AssistantRepository(client)
+        /** Firestore-backed data (Copilot conversations, connector status) — null when the build has no Firebase config. */
+        val firestoreConnector: FirestoreClient? = firebaseConfig?.let { FirestoreClient(it, it.connectorDatabase, auth, client.httpClient) }
+        /** In-app notifications — null when the build has no Firebase config. */
+        val firestoreNotifications: FirestoreClient? = firebaseConfig?.let { FirestoreClient(it, it.notificationsDatabase, auth, client.httpClient) }
     }
 
-    private fun restoredSession(): Session? {
-        val stored = tokenStore.load() ?: return null
-        if (stored.isPending) { tokenStore.clear(); return null }
-        return stored
-    }
-
-    /** Graph for the active tenant; throws if used while signed out (a programming error). */
+    /** Graph for the active workspace; throws if used while signed out (a programming error). */
     fun graph(): Graph = graph ?: error("No active session")
 
     /**
-     * A graph for signing in. With a blank tenant the auth calls go to the global root (email + password first,
-     * workspace afterwards); with a tenant they are scoped to that workspace.
+     * A graph for signing in: blank tenant = the global root (step 1, listing workspaces); a `schema_name` =
+     * that workspace (step 2, the actual login).
      */
-    fun graphFor(tenant: String = "", firebaseTenantId: String? = null): Graph = Graph(tenant, firebaseTenantId)
+    fun graphFor(tenant: String = ""): Graph = Graph(tenant)
 
     fun onSignedIn(session: Session) {
         tokenStore.lastTenant = session.tenant
         tokenStore.lastEmail = session.email
-        pendingSwitch = null
-        graph = Graph(session.tenant, session.firebaseTenantId)
+        graph = Graph(session.tenant)
+        _switchingWorkspace.value = false
         _session.value = session
     }
 
-    /** Keep the tokens, drop the workspace: the login screen shows the picker again. */
-    fun switchWorkspace() {
-        val current = _session.value ?: return
-        pendingSwitch = current.copy(tenant = "")
-        graph = null
-        _session.value = null
-    }
+    /**
+     * Keep the current workspace until the new login succeeds; the login screen asks for the password again
+     * (the backend's login is per workspace, and the app never stores the password).
+     */
+    fun switchWorkspace() { _switchingWorkspace.value = true }
+    fun cancelWorkspaceSwitch() { _switchingWorkspace.value = false }
 
-    /** Backing out of a workspace switch: restore the previous workspace without re-authenticating. */
-    fun cancelWorkspaceSwitch() {
-        val pending = pendingSwitch ?: return
-        val previous = tokenStore.lastTenant ?: return
-        pendingSwitch = null
-        onSignedIn(pending.copy(tenant = previous))
-    }
-
+    /** Delete both JWTs and the Firebase tokens; nothing is cached locally beyond that. */
     fun signOut() {
         tokenStore.clear()
-        pendingSwitch = null
+        _switchingWorkspace.value = false
         graph = null
         _session.value = null
+    }
+
+    companion object {
+        /** "Production" / "Staging" / "Development" for the Settings screen. */
+        val environmentName: String get() = ApiConfig(tenant = "", apiRoot = BuildConfig.API_ROOT).environmentName
+
+        /** Build-time Firebase configuration (android/easyesuite.properties or CI secrets); null = REST only. */
+        val firebaseConfig: FirebaseConfig? = BuildConfig.FIREBASE_API_KEY.takeIf { it.isNotBlank() }?.let { key ->
+            BuildConfig.FIREBASE_PROJECT_ID.takeIf { it.isNotBlank() }?.let { project ->
+                FirebaseConfig(
+                    apiKey = key, projectId = project,
+                    connectorDatabase = BuildConfig.FIRESTORE_CONNECTOR_DB.ifBlank { "(default)" },
+                    notificationsDatabase = BuildConfig.FIRESTORE_NOTIFICATIONS_DB.ifBlank { "(default)" },
+                )
+            }
+        }
     }
 }

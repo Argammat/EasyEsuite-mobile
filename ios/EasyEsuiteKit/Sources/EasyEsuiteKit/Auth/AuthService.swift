@@ -1,103 +1,122 @@
 import Foundation
 
-/// Sign-in the way the web app does it: **email + password first, then pick the company (workspace)**.
+/// Sign-in exactly as the backend team specified (answers of 2026-10-09):
 ///
-/// 1. `login` authenticates without a tenant (global root, or Identity Platform at project level) and returns
-///    `.workspaceRequired` with the user's workspaces; with exactly one workspace it signs straight in.
-/// 2. `selectWorkspace` turns the pending session into a tenant-scoped one and stores it.
+/// 1. `workspaces(email:password:)` — `POST {global}auth/login/tenants/` lists the user's workspaces (no token).
+///    One workspace → log straight in; several → the app shows a picker.
+/// 2. `login(email:password:)` on a client scoped to the chosen `schema_name` — `POST auth/login/` returns the
+///    backend JWTs (access 5 min, refresh 1 day, rotated on every refresh) plus `user` and, when the workspace
+///    has a Firebase tenant, a `firebase_custom_token`.
+/// 3. The custom token is exchanged for a Firebase ID token (`attachFirebase`) — only the Firestore-backed
+///    screens need it; if it fails the REST API keeps working.
 ///
-/// Two token strategies, chosen by `ApiConfig.firebase`:
-///  - **Firebase direct** (backend team's description): email/password → Identity Platform; the ID token is the Bearer.
-///  - **Backend-proxied**: `POST auth/login/` returns the tokens; refresh is `POST auth/token/refresh/`.
-/// When the client already has a tenant (re-authentication inside a workspace) the tenant-scoped paths are used.
+/// Special cases: `needs_password_reset` blocks the app (`.passwordResetRequired`); MFA adds a one-time-code
+/// step (`.secondFactorRequired`) before the session is stored.
 public final class AuthService: @unchecked Sendable {
     private let client: APIClient
-    private let firebase: FirebaseAuth?
+    public let firebase: FirebaseAuth?
 
     public init(client: APIClient, firebase: FirebaseAuth? = nil) {
         self.client = client
-        self.firebase = firebase ?? client.config.firebase.map { FirebaseAuth(config: $0) }
+        self.firebase = firebase ?? client.config.firebase.map { FirebaseAuth(config: $0, urlSession: client.urlSession) }
     }
 
-    private var scopedToTenant: Bool { !client.config.tenant.isEmpty }
+    // MARK: Step 1
 
+    /// The workspaces the credentials unlock, most recently used first. Never returns a token.
+    public func workspaces(email: String, password: String) async throws -> [Workspace] {
+        do {
+            let list: [Workspace] = try await client.post(client.globalPath(Endpoints.loginTenants), body: LoginRequest(email: trim(email), password: password), authenticated: false)
+            return list
+        } catch APIError.http(let status, _, let body) where status == 401 {
+            // The backend returns the same body for a wrong password, unknown email or locked account — on purpose.
+            throw APIError.http(status: 401, detail: "Email or password is incorrect.", body: body)
+        } catch APIError.http(let status, _, let body) where status == 429 {
+            throw APIError.http(status: 429, detail: "Too many sign-in attempts. Wait a minute and try again.", body: body)
+        }
+    }
+
+    // MARK: Step 2
+
+    /// Log in to the workspace this client is scoped to. The password is only held in memory between step 1 and here.
     public func login(email: String, password: String) async throws -> LoginResult {
-        let trimmed = email.trimmingCharacters(in: .whitespaces)
-        if let firebase {
-            let tokens = try await firebase.signIn(email: trimmed, password: password)
-            let pending = Session(
-                tenant: client.config.tenant, access: tokens.idToken, refresh: tokens.refreshToken.nilIfEmpty,
-                accessExpiration: tokens.expiresAtIso, email: trimmed, provider: Session.providerFirebase, firebaseTenantId: firebase.config.tenantId
-            )
-            return try await finish(pending, fromLogin: nil)
+        try requireTenant()
+        let res: TokenResponse = try await client.post(Endpoints.login, body: LoginRequest(email: trim(email), password: password), authenticated: false)
+        return try await handle(res, email: trim(email), afterSecondFactor: false)
+    }
+
+    /// The one-time-code step for MFA users. Body ASSUMED (`{email, ephemeral_token, code}`).
+    public func completeSecondFactor(email: String, challengeToken: String?, pending: Session?, code: String) async throws -> LoginResult {
+        try requireTenant()
+        if let pending { client.tokenStore.save(pending) }   // lets the 2FA call authenticate if the backend expects it
+        let res: TokenResponse = try await client.post(Endpoints.login2FA, body: TwoFactorRequest(email: trim(email), ephemeralToken: challengeToken, code: code.trimmingCharacters(in: .whitespaces)), authenticated: pending != nil)
+        if res.resolvedAccess == nil, let pending {
+            // The code was accepted but no new tokens came back: the tokens from the login step are the session.
+            return .success(await finish(pending, customToken: nil))
         }
-        let res: TokenResponse = try await client.post(path(Endpoints.login), body: LoginRequest(email: trimmed, password: password), authenticated: false)
-        return try await handle(res, email: trimmed)
+        return try await handle(res, email: trim(email), afterSecondFactor: true)
     }
 
-    public func completeSecondFactor(email: String, challengeToken: String?, code: String) async throws -> LoginResult {
-        let res: TokenResponse = try await client.post(
-            path(Endpoints.login2FA),
-            body: TwoFactorRequest(email: email.trimmingCharacters(in: .whitespaces), ephemeralToken: challengeToken, code: code.trimmingCharacters(in: .whitespaces)),
-            authenticated: false
-        )
-        return try await handle(res, email: email.trimmingCharacters(in: .whitespaces))
-    }
-
-    /// The workspaces the signed-in user can open. Empty when the backend offers no list (UI then asks for the slug).
-    public func workspaces() async throws -> [TenantInfo] {
-        var attempts = [client.globalPath(Endpoints.myTenants)]          // ASSUMED: global `users/me/tenants/`
-        if scopedToTenant { attempts.append(Endpoints.myTenants) }       // tenant-scoped variant (VERIFIED path)
-        for p in attempts {
-            do {
-                let raw: JSONValue = try await client.get(p)
-                let list = TenantInfo.list(from: raw)
-                if !list.isEmpty { return list }
-            } catch APIError.http(let status, _, _) where status == 404 || status == 405 {
-                continue
-            }
+    private func handle(_ res: TokenResponse, email: String, afterSecondFactor: Bool) async throws -> LoginResult {
+        if res.user?.needsPasswordReset == true { return .passwordResetRequired(email: res.user?.email ?? email) }
+        guard let access = res.resolvedAccess else {
+            if res.needsSecondFactor { return .secondFactorRequired(pending: nil, challengeToken: res.challengeToken, message: res.detail) }
+            throw APIError.decoding("login response had no access token", body: nil)
         }
-        return []
-    }
-
-    /// Pick the company: the pending tokens become the session for `tenant`, and it is persisted.
-    public func selectWorkspace(_ pending: Session, tenant: String) -> Session {
-        var session = pending
-        session.tenant = tenant.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        client.tokenStore.save(session)
-        return session
-    }
-
-    private func handle(_ res: TokenResponse, email: String) async throws -> LoginResult {
-        if res.needsSecondFactor { return .secondFactorRequired(challengeToken: res.challengeToken, message: res.detail) }
-        guard let access = res.resolvedAccess else { throw APIError.decoding("login response had no access token", body: nil) }
-        let pending = Session(
+        let session = Session(
             tenant: client.config.tenant, access: access, refresh: res.resolvedRefresh,
-            accessExpiration: res.accessExpiration, refreshExpiration: res.refreshExpiration,
-            email: email, provider: Session.providerBackend
+            accessExpiration: res.accessExpiration ?? JWT.expirationIso(access),
+            refreshExpiration: res.refreshExpiration ?? JWT.expirationIso(res.resolvedRefresh),
+            email: res.user?.email ?? email, tenantId: res.user?.tenantId, userPk: res.user?.pk,
+            roles: res.user?.allRoleNames ?? [], firebaseTenantId: res.user?.firebaseTenantId
         )
-        return try await finish(pending, fromLogin: res.user)
-    }
-
-    /// Already inside a workspace → done. Otherwise store the pending tokens and resolve the workspace list.
-    private func finish(_ pending: Session, fromLogin: JSONValue?) async throws -> LoginResult {
-        if !pending.isPending {
-            client.tokenStore.save(pending)
-            return .success(pending)
+        if !afterSecondFactor, res.user?.requiresSecondFactor == true {
+            return .secondFactorRequired(pending: session, challengeToken: res.challengeToken, message: res.detail)
         }
-        client.tokenStore.save(pending)   // authenticates the workspaces call; replaced by selectWorkspace()
-        let fromUser = TenantInfo.list(from: fromLogin?["tenants"] ?? fromLogin?["workspaces"] ?? fromLogin?["companies"] ?? fromLogin?["clients"])
-        let list = fromUser.isEmpty ? ((try? await workspaces()) ?? []) : fromUser
-        if list.count == 1 { return .success(selectWorkspace(pending, tenant: list[0].slug)) }
-        return .workspaceRequired(pending: pending, workspaces: list)
+        return .success(await finish(session, customToken: res.firebaseCustomToken))
     }
 
-    private func path(_ tenantScoped: String) -> String { scopedToTenant ? tenantScoped : client.globalPath(tenantScoped) }
+    private func finish(_ session: Session, customToken: String?) async -> Session {
+        client.tokenStore.save(session)
+        return await attachFirebase(session, customToken: customToken)
+    }
+
+    // MARK: Step 3
+
+    /// Exchange the backend's custom token for Firebase tokens and store them with the session. Failure is
+    /// tolerated: the app carries on with REST only (the web app shows a small warning in that case).
+    public func attachFirebase(_ session: Session, customToken: String?) async -> Session {
+        guard let firebase, let customToken = customToken?.nilIfBlank, let tenantId = session.firebaseTenantId?.nilIfBlank,
+              let tokens = try? await firebase.signIn(customToken: customToken, tenantId: tenantId) else { return session }
+        var updated = session
+        updated.firebase = tokens.session
+        client.tokenStore.save(updated)
+        return updated
+    }
+
+    /// A valid Firebase ID token for Firestore calls, refreshed when it is about to expire. Nil = no Firestore access.
+    public func firebaseIdToken() async -> String? {
+        guard let session = client.tokenStore.load(), let fb = session.firebase else { return nil }
+        if !fb.isExpiring() { return fb.idToken }
+        guard let firebase, !fb.refreshToken.isEmpty, let tokens = try? await firebase.refresh(fb.refreshToken) else { return nil }
+        var updated = session
+        updated.firebase = tokens.session
+        client.tokenStore.save(updated)
+        return tokens.idToken
+    }
+
+    // MARK: Misc
 
     public func me() async throws -> UserProfile { try await client.get(Endpoints.me) }
 
-    public func myTenants() async throws -> [TenantInfo] { try await workspaces() }
-
+    /// Signing out: drop both JWTs and the Firebase tokens (nothing to revoke server-side for the custom-token sign-in).
     public func logout() { client.tokenStore.clear() }
-    public var isSignedIn: Bool { client.tokenStore.load().map { !$0.isPending } ?? false }
+
+    public var isSignedIn: Bool { client.tokenStore.load() != nil }
+
+    private func trim(_ email: String) -> String { email.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    private func requireTenant() throws {
+        if client.config.tenant.isEmpty { throw APIError.decoding("login needs a workspace: build the client with the chosen schema_name", body: nil) }
+    }
 }
