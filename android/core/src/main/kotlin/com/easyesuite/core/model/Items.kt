@@ -332,7 +332,8 @@ data class ItemHistoryRow(
     val timestamp: String?,
 ) {
     /** `sale_price` → "Sale price". */
-    val fieldLabel: String get() = field?.replace('_', ' ')?.replaceFirstChar { it.uppercase() }.orEmpty()
+    // `this.field`: inside a getter the bare word `field` is the backing-field keyword.
+    val fieldLabel: String get() = this.field?.replace('_', ' ')?.replaceFirstChar { it.uppercase() }.orEmpty()
 
     companion object {
         /** Values are usually strings or null; nested JSON is shown as compact text. */
