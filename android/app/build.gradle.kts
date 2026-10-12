@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -10,7 +12,7 @@ plugins {
  * `android/easyesuite.properties` (see easyesuite.properties.example), else a Gradle property, else an
  * environment variable, else "" (= production REST API, Firestore screens disabled).
  */
-val envProps = java.util.Properties().apply {
+val envProps = Properties().apply {   // `java.util.Properties` would resolve `java` to the Gradle extension here
     val f = rootProject.file("easyesuite.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
